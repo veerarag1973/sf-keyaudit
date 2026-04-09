@@ -10,18 +10,19 @@
 //! When a provider updates their key format the version number increments,
 //! keeping older allowlist entries identifiable.
 
+use crate::config::CustomRuleDef;
 use crate::error::AuditError;
 use fancy_regex::Regex;
 
 /// A compiled pattern entry.
 pub struct Pattern {
     /// Stable identifier, e.g. `openai-project-key-v2`.
-    pub id: &'static str,
+    pub id: String,
     /// Provider slug used in Finding.provider, e.g. `openai`.
-    pub provider: &'static str,
+    pub provider: String,
     /// Human-readable one-line description.
     #[allow(dead_code)]
-    pub description: &'static str,
+    pub description: String,
     /// Compiled regex.  Must contain a named group `body`.
     /// May optionally contain a named group `prefix`.
     pub regex: Regex,
@@ -29,6 +30,10 @@ pub struct Pattern {
     /// the finding to be classified as high-confidence (exit 1).
     /// Matches below this threshold go into `low_confidence_findings`.
     pub min_entropy: f64,
+    /// Severity: "critical", "high", or "medium".
+    pub severity: String,
+    /// Provider-specific remediation guidance.
+    pub remediation: String,
 }
 
 impl std::fmt::Debug for Pattern {
@@ -49,6 +54,8 @@ struct PatternDef {
     /// May include `(?P<prefix>...)` for the human-visible prefix.
     pattern: &'static str,
     min_entropy: f64,
+    severity: &'static str,
+    remediation: &'static str,
 }
 
 /// Build and return all compiled patterns in priority order.
@@ -63,6 +70,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "Anthropic Claude API key (sk-ant-api03- prefix)",
             pattern: r"(?P<prefix>sk-ant-api03-)(?P<body>[A-Za-z0-9+/=_-]{93})",
             min_entropy: 3.5,
+            severity: "critical",
+            remediation: "Revoke at https://console.anthropic.com/settings/keys and regenerate immediately. Replace with an environment variable or secrets manager.",
         },
         // ── OpenAI ─────────────────────────────────────────────────────────
         PatternDef {
@@ -71,6 +80,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "OpenAI project API key (sk-proj- prefix)",
             pattern: r"(?P<prefix>sk-proj-)(?P<body>[A-Za-z0-9_-]{100,200})",
             min_entropy: 4.0,
+            severity: "critical",
+            remediation: "Revoke at https://platform.openai.com/api-keys. Rotate all dependent services and store in a secrets manager.",
         },
         PatternDef {
             id: "openai-svcacct-key-v1",
@@ -78,6 +89,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "OpenAI service-account API key (sk-svcacct- prefix)",
             pattern: r"(?P<prefix>sk-svcacct-)(?P<body>[A-Za-z0-9_-]{100,200})",
             min_entropy: 4.0,
+            severity: "critical",
+            remediation: "Revoke at https://platform.openai.com/api-keys. Rotate all dependent services and store in a secrets manager.",
         },
         // ── OpenRouter ─────────────────────────────────────────────────────
         // Must appear BEFORE the generic sk- pattern to avoid false attribution.
@@ -87,6 +100,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "OpenRouter API key (sk-or- prefix)",
             pattern: r"(?P<prefix>sk-or-(?:v\d+-?)?)(?P<body>[A-Za-z0-9_-]{40,100})",
             min_entropy: 3.5,
+            severity: "high",
+            remediation: "Revoke at https://openrouter.ai/keys and regenerate.",
         },
         // ── OpenAI legacy / Stability AI ───────────────────────────────────
         // The sk- prefix is shared by both OpenAI legacy and Stability AI.
@@ -97,6 +112,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "OpenAI legacy API key (bare sk- prefix, 48 alphanumeric chars)",
             pattern: r"(?P<prefix>sk-)(?!proj-|svcacct-|ant-|or-)(?P<body>[A-Za-z0-9]{48})(?:[^A-Za-z0-9]|$)",
             min_entropy: 3.5,
+            severity: "critical",
+            remediation: "Revoke at https://platform.openai.com/api-keys. Rotate all dependent services and store in a secrets manager.",
         },
         // ── Stability AI (context-sensitive) ───────────────────────────────
         PatternDef {
@@ -105,6 +122,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "Stability AI API key (STABILITY_API_KEY context)",
             pattern: r#"(?i)(?:STABILITY(?:_AI)?_API_KEY)[\s]*[=:]["']?\s*(?P<body>sk-[A-Za-z0-9]{48})"#,
             min_entropy: 3.5,
+            severity: "high",
+            remediation: "Revoke at https://platform.stability.ai/account/keys and regenerate.",
         },
         // ── Google AI / Gemini ─────────────────────────────────────────────
         PatternDef {
@@ -113,6 +132,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "Google AI / Gemini API key (AIza prefix, 39 chars total)",
             pattern: r"(?P<prefix>AIza)(?P<body>[0-9A-Za-z_-]{35})",
             min_entropy: 3.5,
+            severity: "critical",
+            remediation: "Revoke at https://console.cloud.google.com/apis/credentials. Restrict key to required APIs only and move to a secrets manager.",
         },
         // ── Google Vertex AI Service Account ───────────────────────────────
         // Detects a committed service account JSON file by looking for the
@@ -123,6 +144,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "Google Vertex AI service account JSON (type:service_account with private_key_id)",
             pattern: r#"(?s)"type"\s*:\s*"service_account".{0,1000}?"private_key_id"\s*:\s*"(?P<body>[^"]{20,64})""#,
             min_entropy: 3.0,
+            severity: "critical",
+            remediation: "Delete and regenerate the service account key at https://console.cloud.google.com/iam-admin/serviceaccounts. Prefer Workload Identity Federation over long-lived service account keys.",
         },
         // ── AWS Bedrock ────────────────────────────────────────────────────
         PatternDef {
@@ -131,6 +154,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "AWS access key ID (AKIA/ASIA prefix)",
             pattern: r"(?P<prefix>(?:AKIA|ASIA))(?P<body>[0-9A-Z]{16})",
             min_entropy: 3.0,
+            severity: "critical",
+            remediation: "Deactivate in AWS IAM console at https://console.aws.amazon.com/iam/. Use IAM roles and instance profiles instead of long-lived access keys.",
         },
         // ── Azure OpenAI ───────────────────────────────────────────────────
         PatternDef {
@@ -139,6 +164,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "Azure OpenAI / Cognitive Services subscription key (Ocp-Apim-Subscription-Key header)",
             pattern: r#"(?i)(?P<prefix>Ocp-Apim-Subscription-Key[\s]*[:=]["']?\s*)(?P<body>[0-9a-fA-F]{32})"#,
             min_entropy: 3.0,
+            severity: "critical",
+            remediation: "Regenerate at Azure Portal → Cognitive Services → Keys. Use Managed Identity instead of subscription keys where possible.",
         },
         // ── Cohere ─────────────────────────────────────────────────────────
         PatternDef {
@@ -147,6 +174,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "Cohere API key (co- prefix)",
             pattern: r"(?P<prefix>co-)(?P<body>[A-Za-z0-9]{40,80})",
             min_entropy: 3.5,
+            severity: "high",
+            remediation: "Revoke at https://dashboard.cohere.com/api-keys and regenerate.",
         },
         // ── Mistral AI ─────────────────────────────────────────────────────
         PatternDef {
@@ -155,6 +184,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "Mistral AI API key (mi- prefix with hex body)",
             pattern: r"(?P<prefix>mi-)(?P<body>[A-Za-z0-9]{40,80})",
             min_entropy: 3.5,
+            severity: "high",
+            remediation: "Revoke at https://console.mistral.ai/api-keys and regenerate.",
         },
         // ── Hugging Face ───────────────────────────────────────────────────
         PatternDef {
@@ -163,6 +194,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "Hugging Face user access token (hf_ prefix)",
             pattern: r"(?P<prefix>hf_)(?P<body>[A-Za-z0-9]{34,50})",
             min_entropy: 3.5,
+            severity: "high",
+            remediation: "Revoke at https://huggingface.co/settings/tokens and regenerate.",
         },
         // ── Replicate ──────────────────────────────────────────────────────
         PatternDef {
@@ -171,6 +204,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "Replicate API token (r8_ prefix, 40-char hex body)",
             pattern: r"(?P<prefix>r8_)(?P<body>[a-fA-F0-9]{40})",
             min_entropy: 3.5,
+            severity: "high",
+            remediation: "Revoke at https://replicate.com/account/api-tokens and regenerate.",
         },
         // ── Together AI ────────────────────────────────────────────────────
         PatternDef {
@@ -179,6 +214,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "Together AI API key (context-sensitive: TOGETHER variable with 40-char hex body)",
             pattern: r#"(?i)(?:TOGETHER(?:_AI)?_API_KEY)[\s]*[=:]["']?\s*(?P<body>[a-fA-F0-9]{40,64})"#,
             min_entropy: 3.5,
+            severity: "high",
+            remediation: "Revoke at https://api.together.xyz/settings/api-keys and regenerate.",
         },
         // ── Groq ───────────────────────────────────────────────────────────
         PatternDef {
@@ -187,6 +224,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "Groq API key (gsk_ prefix)",
             pattern: r"(?P<prefix>gsk_(?:live_|test_)?)(?P<body>[A-Za-z0-9]{52})",
             min_entropy: 3.5,
+            severity: "high",
+            remediation: "Revoke at https://console.groq.com/keys and regenerate.",
         },
         // ── Perplexity AI ──────────────────────────────────────────────────
         PatternDef {
@@ -195,6 +234,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "Perplexity AI API key (pplx- prefix)",
             pattern: r"(?P<prefix>pplx-)(?P<body>[A-Za-z0-9]{48})",
             min_entropy: 3.5,
+            severity: "high",
+            remediation: "Revoke at https://www.perplexity.ai/account/api and regenerate.",
         },
         // ── ElevenLabs ─────────────────────────────────────────────────────
         PatternDef {
@@ -203,6 +244,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "ElevenLabs API key (xi-api-key header or ELEVENLABS_API_KEY env var)",
             pattern: r#"(?i)(?P<prefix>(?:xi-api-key|ELEVENLABS_API_KEY|XI_API_KEY)[\s]*[:=]["']?\s*)(?P<body>[a-fA-F0-9]{32})"#,
             min_entropy: 3.0,
+            severity: "medium",
+            remediation: "Revoke at https://elevenlabs.io/app/api-key and regenerate.",
         },
         // ── Pinecone ───────────────────────────────────────────────────────
         PatternDef {
@@ -211,6 +254,8 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "Pinecone API key (UUID-format, context-sensitive: PINECONE variable)",
             pattern: r#"(?i)(?:PINECONE_API_KEY|PINECONE_KEY)[\s]*[=:]["']?\s*(?P<body>[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})"#,
             min_entropy: 3.0,
+            severity: "medium",
+            remediation: "Revoke at https://app.pinecone.io/ and regenerate.",
         },
         // ── Weaviate ───────────────────────────────────────────────────────
         PatternDef {
@@ -219,21 +264,152 @@ pub fn build_patterns() -> Result<Vec<Pattern>, AuditError> {
             description: "Weaviate API key (X-Weaviate-Api-Key header or WEAVIATE_API_KEY env var)",
             pattern: r#"(?i)(?P<prefix>(?:X-Weaviate-Api-Key|WEAVIATE_API_KEY)[\s]*[:=]["']?\s*)(?P<body>[A-Za-z0-9+/=_-]{20,100})"#,
             min_entropy: 3.0,
+            severity: "medium",
+            remediation: "Revoke and regenerate at https://console.weaviate.cloud/.",
+        },        // ── Stripe ─────────────────────────────────────────────────────
+        PatternDef {
+            id: "stripe-live-secret-key-v1",
+            provider: "stripe",
+            description: "Stripe live secret API key (sk_live_ prefix)",
+            pattern: r"(?P<prefix>sk_live_)(?P<body>[0-9a-zA-Z]{24,96})",
+            min_entropy: 3.5,
+            severity: "critical",
+            remediation: "Revoke immediately at https://dashboard.stripe.com/apikeys. Live keys can charge real payment methods.",
         },
-    ];
+        PatternDef {
+            id: "stripe-restricted-key-v1",
+            provider: "stripe",
+            description: "Stripe restricted secret key (rk_live_ prefix)",
+            pattern: r"(?P<prefix>rk_live_)(?P<body>[0-9a-zA-Z]{24,96})",
+            min_entropy: 3.5,
+            severity: "high",
+            remediation: "Revoke at https://dashboard.stripe.com/apikeys and regenerate with minimal required permissions.",
+        },
+        // ── Slack ──────────────────────────────────────────────────────
+        PatternDef {
+            id: "slack-bot-token-v1",
+            provider: "slack",
+            description: "Slack bot OAuth token (xoxb- prefix)",
+            pattern: r"(?P<prefix>xoxb-)(?P<body>[0-9]{10,13}-[0-9]{10,13}-[0-9A-Za-z]{24,28})",
+            min_entropy: 3.5,
+            severity: "high",
+            remediation: "Revoke at https://api.slack.com/apps → OAuth & Permissions → Revoke Token.",
+        },
+        PatternDef {
+            id: "slack-user-token-v1",
+            provider: "slack",
+            description: "Slack user OAuth token (xoxp- prefix)",
+            pattern: r"(?P<prefix>xoxp-)(?P<body>[0-9]{10,13}-[0-9]{10,13}-[0-9]{10,13}-[0-9a-f]{32})",
+            min_entropy: 3.5,
+            severity: "high",
+            remediation: "Revoke at https://api.slack.com/apps → OAuth & Permissions → Revoke Token.",
+        },
+        // ── GitHub ─────────────────────────────────────────────────────
+        PatternDef {
+            id: "github-fine-grained-pat-v1",
+            provider: "github",
+            description: "GitHub fine-grained personal access token (github_pat_ prefix, 82-char body)",
+            pattern: r"(?P<prefix>github_pat_)(?P<body>[A-Za-z0-9_]{82})",
+            min_entropy: 4.0,
+            severity: "critical",
+            remediation: "Revoke at https://github.com/settings/tokens and regenerate. Apply least-privilege repository scopes.",
+        },
+        PatternDef {
+            id: "github-classic-pat-v1",
+            provider: "github",
+            description: "GitHub classic personal access token (ghp_ prefix)",
+            pattern: r"(?P<prefix>ghp_)(?P<body>[A-Za-z0-9]{36})",
+            min_entropy: 3.5,
+            severity: "critical",
+            remediation: "Revoke at https://github.com/settings/tokens and regenerate. Migrate to fine-grained tokens with minimal scopes.",
+        },
+        PatternDef {
+            id: "github-oauth-token-v1",
+            provider: "github",
+            description: "GitHub OAuth access token (gho_ prefix)",
+            pattern: r"(?P<prefix>gho_)(?P<body>[A-Za-z0-9]{36})",
+            min_entropy: 3.5,
+            severity: "high",
+            remediation: "Revoke the OAuth token via the issuing app's settings or https://github.com/settings/applications.",
+        },
+        // ── GitLab ─────────────────────────────────────────────────────
+        PatternDef {
+            id: "gitlab-pat-v1",
+            provider: "gitlab",
+            description: "GitLab personal access token (glpat- prefix)",
+            pattern: r"(?P<prefix>glpat-)(?P<body>[0-9A-Za-z_\-]{20})",
+            min_entropy: 3.5,
+            severity: "critical",
+            remediation: "Revoke at https://gitlab.com/-/profile/personal_access_tokens and regenerate with minimal scopes.",
+        },
+        // ── SendGrid ───────────────────────────────────────────────────
+        PatternDef {
+            id: "sendgrid-api-key-v1",
+            provider: "sendgrid",
+            description: "SendGrid API key (SG. prefix, two base64url segments)",
+            pattern: r"(?P<prefix>SG\.)(?P<body>[A-Za-z0-9_\-]{22}\.[A-Za-z0-9_\-]{43})",
+            min_entropy: 4.0,
+            severity: "high",
+            remediation: "Revoke at https://app.sendgrid.com/settings/api_keys and regenerate with minimal required permissions.",
+        },
+        // ── Twilio ─────────────────────────────────────────────────────
+        PatternDef {
+            id: "twilio-account-sid-v1",
+            provider: "twilio",
+            description: "Twilio Account SID in context (AC prefix, 32 hex chars)",
+            pattern: r#"(?i)(?:TWILIO_ACCOUNT_SID|ACCOUNT_SID)[\s]*[=:]["']?\s*(?P<body>AC[a-f0-9]{32})"#,
+            min_entropy: 3.0,
+            severity: "high",
+            remediation: "Rotate API credentials at https://console.twilio.com/ and update all dependent integrations.",
+        },
+        PatternDef {
+            id: "twilio-auth-token-v1",
+            provider: "twilio",
+            description: "Twilio Auth Token in context (TWILIO_AUTH_TOKEN env var)",
+            pattern: r#"(?i)(?:TWILIO_AUTH_TOKEN|TWILIO_TOKEN)[\s]*[=:]["']?\s*(?P<body>[a-f0-9]{32})"#,
+            min_entropy: 3.0,
+            severity: "critical",
+            remediation: "Rotate the Auth Token at https://console.twilio.com/ and invalidate all existing sessions.",
+        },    ];
 
     defs.iter()
         .map(|def| {
             let regex = Regex::new(def.pattern).map_err(|source| AuditError::PatternCompile {
-                id: def.id,
+                id: def.id.to_string(),
                 source,
             })?;
             Ok(Pattern {
-                id: def.id,
-                provider: def.provider,
-                description: def.description,
+                id: def.id.to_string(),
+                provider: def.provider.to_string(),
+                description: def.description.to_string(),
                 regex,
                 min_entropy: def.min_entropy,
+                severity: def.severity.to_string(),
+                remediation: def.remediation.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// Build additional [`Pattern`]s from custom rule definitions loaded from the
+/// project configuration file (`.sfkeyaudit.yaml`).
+pub fn build_custom_patterns(defs: &[CustomRuleDef]) -> Result<Vec<Pattern>, AuditError> {
+    defs.iter()
+        .map(|def| {
+            let regex = Regex::new(&def.pattern).map_err(|source| AuditError::PatternCompile {
+                id: def.id.clone(),
+                source,
+            })?;
+            Ok(Pattern {
+                id: def.id.clone(),
+                provider: def.provider.clone(),
+                description: def.description.clone().unwrap_or_default(),
+                regex,
+                min_entropy: def.min_entropy.unwrap_or(3.0),
+                severity: def.severity.clone().unwrap_or_else(|| "high".to_string()),
+                remediation: def.remediation.clone().unwrap_or_else(|| {
+                    format!("Revoke and rotate the {} credential.", def.provider)
+                }),
             })
         })
         .collect()
@@ -254,7 +430,7 @@ pub fn filter_by_providers<'a>(
 
     // Collect the canonical slug set from the compiled patterns.
     let known: std::collections::HashSet<&str> =
-        patterns.iter().map(|p| p.provider).collect();
+        patterns.iter().map(|p| p.provider.as_str()).collect();
 
     // Validate every requested provider before filtering.
     for requested in providers {
@@ -296,17 +472,36 @@ mod tests {
     fn all_patterns_compile() {
         let p = build_patterns();
         assert!(p.is_ok(), "patterns failed to compile: {:?}", p.err());
-        assert!(p.unwrap().len() >= 18);
+        assert!(p.unwrap().len() >= 29);
     }
 
     #[test]
     fn pattern_ids_are_unique() {
         let p = patterns();
-        let mut ids: Vec<&str> = p.iter().map(|x| x.id).collect();
+        let mut ids: Vec<&str> = p.iter().map(|x| x.id.as_str()).collect();
         ids.sort_unstable();
         let before = ids.len();
         ids.dedup();
         assert_eq!(before, ids.len(), "duplicate pattern ids detected");
+    }
+
+    #[test]
+    fn all_patterns_have_severity() {
+        let p = patterns();
+        for pat in &p {
+            assert!(
+                ["critical", "high", "medium"].contains(&pat.severity.as_str()),
+                "pattern {} has invalid severity '{}'", pat.id, pat.severity
+            );
+        }
+    }
+
+    #[test]
+    fn all_patterns_have_remediation() {
+        let p = patterns();
+        for pat in &p {
+            assert!(!pat.remediation.is_empty(), "pattern {} has empty remediation", pat.id);
+        }
     }
 
     // ── Anthropic ───────────────────────────────────────────────────────────
@@ -330,6 +525,13 @@ mod tests {
         let p = patterns();
         let body = "x".repeat(93);
         assert!(!matches(&p, "anthropic-api-key-v1", &format!("sk-ant-api04-{body}")));
+    }
+
+    #[test]
+    fn anthropic_severity_is_critical() {
+        let p = patterns();
+        let pat = p.iter().find(|x| x.id == "anthropic-api-key-v1").unwrap();
+        assert_eq!(pat.severity, "critical");
     }
 
     // ── OpenAI project key ──────────────────────────────────────────────────
@@ -386,6 +588,13 @@ mod tests {
         let p = patterns();
         let body = "aB3cD4eF5gH6iJ7kL8mN9oP0qR1sT2uV3wX4yZ5aB3cD4eF5g";
         assert!(matches(&p, "openrouter-api-key-v1", &format!("sk-or-v1-{body}")));
+    }
+
+    #[test]
+    fn openrouter_severity_is_high() {
+        let p = patterns();
+        let pat = p.iter().find(|x| x.id == "openrouter-api-key-v1").unwrap();
+        assert_eq!(pat.severity, "high");
     }
 
     // ── Google Gemini ───────────────────────────────────────────────────────
@@ -453,6 +662,13 @@ mod tests {
         assert!(!matches(&p, "aws-access-key-id-v1", "AKIA1234SHORT"));
     }
 
+    #[test]
+    fn aws_severity_is_critical() {
+        let p = patterns();
+        let pat = p.iter().find(|x| x.id == "aws-access-key-id-v1").unwrap();
+        assert_eq!(pat.severity, "critical");
+    }
+
     // ── Azure OpenAI ────────────────────────────────────────────────────────
 
     #[test]
@@ -499,6 +715,13 @@ mod tests {
     fn cohere_no_match_short_body() {
         let p = patterns();
         assert!(!matches(&p, "cohere-api-key-v1", "co-short"));
+    }
+
+    #[test]
+    fn cohere_severity_is_high() {
+        let p = patterns();
+        let pat = p.iter().find(|x| x.id == "cohere-api-key-v1").unwrap();
+        assert_eq!(pat.severity, "high");
     }
 
     // ── Mistral AI ──────────────────────────────────────────────────────────
@@ -595,8 +818,6 @@ mod tests {
     #[test]
     fn perplexity_key_matches() {
         let p = patterns();
-        let body = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y5z6";
-        assert_eq!(body.len(), 52);
         // 48 chars required — use exactly 48
         let body48 = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4";
         assert_eq!(body48.len(), 48);
@@ -639,6 +860,13 @@ mod tests {
             "elevenlabs-api-key-v1",
             "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d"
         ));
+    }
+
+    #[test]
+    fn elevenlabs_severity_is_medium() {
+        let p = patterns();
+        let pat = p.iter().find(|x| x.id == "elevenlabs-api-key-v1").unwrap();
+        assert_eq!(pat.severity, "medium");
     }
 
     // ── Pinecone ────────────────────────────────────────────────────────────
@@ -726,5 +954,57 @@ mod tests {
         assert!(s.contains("Pattern"), "Debug output should contain 'Pattern': {s}");
         assert!(s.contains("id"), "Debug output should contain 'id': {s}");
         assert!(s.contains("provider"), "Debug output should contain 'provider': {s}");
+    }
+
+    // ── build_custom_patterns ───────────────────────────────────────────────
+
+    #[test]
+    fn custom_pattern_compiles_and_has_fields() {
+        let defs = vec![CustomRuleDef {
+            id: "my-token-v1".to_string(),
+            provider: "myco".to_string(),
+            description: Some("Internal token".to_string()),
+            pattern: r"myco_[A-Za-z0-9]{32}".to_string(),
+            min_entropy: Some(3.0),
+            severity: Some("high".to_string()),
+            remediation: Some("Rotate via internal portal".to_string()),
+        }];
+        let built = build_custom_patterns(&defs).unwrap();
+        assert_eq!(built.len(), 1);
+        assert_eq!(built[0].id, "my-token-v1");
+        assert_eq!(built[0].provider, "myco");
+        assert_eq!(built[0].severity, "high");
+    }
+
+    #[test]
+    fn custom_pattern_defaults_applied() {
+        let defs = vec![CustomRuleDef {
+            id: "bare-v1".to_string(),
+            provider: "barecomp".to_string(),
+            description: None,
+            pattern: r"bare_[A-Za-z0-9]{16}".to_string(),
+            min_entropy: None,
+            severity: None,
+            remediation: None,
+        }];
+        let built = build_custom_patterns(&defs).unwrap();
+        assert_eq!(built[0].min_entropy, 3.0);
+        assert_eq!(built[0].severity, "high");
+        assert!(!built[0].remediation.is_empty());
+    }
+
+    #[test]
+    fn invalid_custom_pattern_returns_error() {
+        let defs = vec![CustomRuleDef {
+            id: "bad-v1".to_string(),
+            provider: "test".to_string(),
+            description: None,
+            pattern: r"[invalid regex(".to_string(),
+            min_entropy: None,
+            severity: None,
+            remediation: None,
+        }];
+        let result = build_custom_patterns(&defs);
+        assert!(result.is_err());
     }
 }

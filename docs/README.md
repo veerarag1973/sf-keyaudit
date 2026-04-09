@@ -17,4 +17,6 @@
 | [Exit Codes](exit-codes.md) | All 5 exit codes and how to use them in scripts |
 | [CI Integration](ci-integration.md) | GitHub Actions, GitLab CI, Azure DevOps, pre-commit hooks |
 | [Entropy & Confidence](entropy-confidence.md) | How entropy filtering works and what low-confidence means |
+| [Baseline](baseline.md) | Onboard existing codebases; generate, use, and prune baseline files |
+| [Configuration](config.md) | Policy-as-code via `.sfkeyaudit.yaml`; custom rules and severity overrides |
 | [Architecture](architecture.md) | Internal design, module map, and data flow |

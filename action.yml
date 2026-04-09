@@ -1,0 +1,100 @@
+name: 'sf-keyaudit'
+description: 'Scan codebases for exposed AI API keys across all major providers'
+author: 'Spanforge'
+
+branding:
+  icon: 'shield'
+  color: 'red'
+
+inputs:
+  path:
+    description: 'Directory to scan (defaults to repo root)'
+    required: false
+    default: '.'
+  format:
+    description: 'Output format: json, sarif, or text'
+    required: false
+    default: 'sarif'
+  output:
+    description: 'Write report to this file path instead of stdout'
+    required: false
+    default: 'sf-keyaudit-results.sarif'
+  since-commit:
+    description: 'Scan files changed since this git ref (e.g. origin/main)'
+    required: false
+  staged:
+    description: 'Scan only staged files'
+    required: false
+    default: 'false'
+  baseline:
+    description: 'Path to a baseline file — suppress already-known findings'
+    required: false
+  verify:
+    description: 'Run offline heuristic validation on findings'
+    required: false
+    default: 'false'
+  fail-fast:
+    description: 'Stop on the first finding'
+    required: false
+    default: 'false'
+  providers:
+    description: 'Comma-separated list of providers to scan (default: all)'
+    required: false
+  args:
+    description: 'Additional arguments passed verbatim to sf-keyaudit'
+    required: false
+    default: ''
+
+outputs:
+  findings-count:
+    description: 'Number of high-confidence findings detected'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Install sf-keyaudit
+      shell: bash
+      run: |
+        if ! command -v sf-keyaudit &>/dev/null; then
+          cargo install sf-keyaudit --locked
+        fi
+
+    - name: Run sf-keyaudit
+      id: scan
+      shell: bash
+      run: |
+        ARGS="${{ inputs.path }}"
+        ARGS="$ARGS --format ${{ inputs.format }}"
+        ARGS="$ARGS --output ${{ inputs.output }}"
+
+        if [ -n "${{ inputs.since-commit }}" ]; then
+          ARGS="$ARGS --since-commit ${{ inputs.since-commit }}"
+        fi
+        if [ "${{ inputs.staged }}" = "true" ]; then
+          ARGS="$ARGS --staged"
+        fi
+        if [ -n "${{ inputs.baseline }}" ]; then
+          ARGS="$ARGS --baseline ${{ inputs.baseline }}"
+        fi
+        if [ "${{ inputs.verify }}" = "true" ]; then
+          ARGS="$ARGS --verify"
+        fi
+        if [ "${{ inputs.fail-fast }}" = "true" ]; then
+          ARGS="$ARGS --fail-fast"
+        fi
+        if [ -n "${{ inputs.providers }}" ]; then
+          ARGS="$ARGS --providers ${{ inputs.providers }}"
+        fi
+
+        # Append any extra user-supplied arguments.
+        ARGS="$ARGS ${{ inputs.args }}"
+
+        sf-keyaudit $ARGS
+        echo "findings-count=$(sf-keyaudit $ARGS --quiet 2>/dev/null; echo $?)" >> "$GITHUB_OUTPUT"
+
+    - name: Upload SARIF to GitHub Code Scanning
+      if: inputs.format == 'sarif' && always()
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.output }}
+        category: sf-keyaudit

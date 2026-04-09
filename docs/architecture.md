@@ -12,10 +12,15 @@ This document describes the internal design of sf-keyaudit for contributors, mai
 | Regex engine | `fancy-regex 0.13` | Patterns with lookahead/lookbehind (fallback to PCRE semantics) |
 | Directory walker | `ignore 0.4` | ripgrep's walker — gitignore-aware, parallel-friendly |
 | Parallelism | `rayon 1` | Parallel file scan across CPU threads |
-| Serialisation | `serde + serde_json + serde_yaml` | JSON report output, YAML allowlist input |
+| Serialisation | `serde + serde_json + serde_yaml` | JSON report output, YAML config/allowlist input |
 | Error handling | `thiserror 1` | Typed error variants with Display |
 | Output IDs | `uuid 1` (v4) | Unique `scan_id` per run |
 | Timestamps | `chrono 0.4` | ISO 8601 UTC timestamps |
+| Hashing | `sha2 0.10` | SHA-256 fingerprints and scan cache hashes |
+| Archive extraction | `zip 2`, `flate2 1`, `tar 0.4` | In-memory extraction of zip/gzip/tar archives |
+| Ordered maps | `indexmap 2` | Deterministic `by_provider` ordering in report output |
+| Temp files | `tempfile 3` | Safe temporary paths for archive extraction |
+| Config format | `serde_yaml` (reused) | `.sfkeyaudit.yaml` project config and baseline JSON |
 
 ---
 
@@ -24,18 +29,26 @@ This document describes the internal design of sf-keyaudit for contributors, mai
 ```
 src/
 ├── main.rs          Entry point, CLI wiring, parallel scan loop, report assembly
-├── cli.rs           Clap-derived Cli struct and --providers parser
-├── patterns.rs      All 20 pattern definitions and filter_by_providers()
+├── cli.rs           Clap-derived Cli struct, --providers parser, all v2.0 flags
+├── config.rs        ProjectConfig loader; auto-discovery; custom rules; severity overrides
+├── patterns.rs      Built-in pattern definitions and filter_by_providers()
 ├── scanner.rs       scan_content() — applies patterns to a single file's text
 ├── walker.rs        walk() and walk_single_file() — filesystem traversal
+├── git.rs           Git integration: staged files, --since-commit, --history, blame
 ├── allowlist.rs     Allowlist YAML loader, matcher, and warning emitter
+├── baseline.rs      Baseline generate/load/apply/prune; BaselineEntry with timestamps
+├── cache.rs         ScanCache: SHA-256 hash persistence; cached_files_skipped counter
+├── ownership.rs     CodeownersMap loader; git blame integration for last_author
+├── verify.rs        Offline validation; heuristics → ValidationStatus (likely-valid / test-key)
+├── fingerprint.rs   fp- prefixed SHA-256 fingerprint derivation
 ├── entropy.rs       shannon_entropy() and high-confidence threshold
-├── types.rs         Finding, Summary, Report, OutputFormat data types
+├── types.rs         Finding, Summary, ScanMetrics, Report, OutputFormat data types
 ├── error.rs         AuditError enum and ExitCode enum
 └── output/
     ├── mod.rs       render() dispatcher — writes to stdout or file
     ├── json.rs      JSON report serialisation
-    └── sarif.rs     SARIF 2.1.0 serialisation
+    ├── sarif.rs     SARIF 2.1.0 serialisation
+    └── text.rs      Human-readable text output with optional --group-by
 ```
 
 ---
@@ -51,25 +64,44 @@ parse_cli()  ─── HEADER / VERSION constants (build.rs env vars)
   ▼
 run_inner(cli)
   │
-  ├─ build_patterns()              compile all regexes once
-  ├─ filter_by_providers()         apply --providers filter
-  ├─ Allowlist::load()             parse --allowlist YAML (if given)
+  ├─ ProjectConfig::load()          auto-discover .sfkeyaudit.yaml; merge CLI overrides
+  ├─ build_patterns()               compile built-in regexes once
+  ├─ merge_custom_rules()           append custom patterns from config
+  ├─ filter_by_providers()          apply --providers filter
+  ├─ Allowlist::load()              parse --allowlist YAML (if given)
+  ├─ Baseline::load()               parse --baseline JSON (if given)
+  ├─ ScanCache::load()              load --cache-file hash DB (if given)
+  ├─ CodeownersMap::load()          parse CODEOWNERS (if --owners)
   │
-  ├─ walk(root, config)            discover file paths (ignore engine)
+  ├─ git mode dispatch
+  │      ├─ --staged           └─ git diff --cached → file list
+  │      ├─ --since-commit REF └─ git diff REF...HEAD → file list
+  │      └─ --history          └─ git log --all → blob list
+  │
+  ├─ walk(root, config)             discover file paths (ignore engine)
   │      returns Vec<WalkEntry>
   │
-  ├─ rayon::par_iter()             parallel across all entries
+  ├─ rayon::par_iter()              parallel across all entries
   │      │
-  │      ├─ read_file_content_lossy()   read file bytes, detect binary
+  │      ├─ cache check                skip if SHA-256 hash unchanged
+  │      ├─ archive dispatch            zip/tar → extract → scan members
+  │      ├─ notebook dispatch           .ipynb → extract code cells
+  │      ├─ read_file_content_lossy()   read bytes, detect binary
   │      └─ scan_content()             apply patterns → Vec<RawFinding>
   │
-  ├─ collect and dedup findings    deduplicate same position/pattern
-  ├─ assign sequential IDs         f-001, f-002, …
-  ├─ Allowlist::apply()            suppress matching entries
+  ├─ collect and dedup findings      deduplicate same position/pattern
+  ├─ fingerprint::compute()          assign fp- SHA-256 per finding
+  ├─ assign sequential IDs           f-001, f-002, …
+  ├─ Allowlist::apply()              suppress matching entries
+  ├─ Baseline::apply_enriched()      suppress baselined; enrich first_seen/last_seen
+  ├─ verify::run()                   heuristics → validation_status (if --verify)
+  ├─ ownership::enrich()             owner + last_author (if --owners)
+  ├─ ScanCache::flush()              write updated hash DB (if --cache-file)
   │
-  ├─ render()                      JSON or SARIF → stdout or file
+  ├─ render()                        JSON / SARIF / Text → stdout or file
+  │      └─ --group-by routing (text only)
   │
-  └─ ExitCode::*                   0/1/2/3/4 based on findings + warnings
+  └─ ExitCode::*                     0/1/2/3/4 based on findings + warnings
 ```
 
 ---
@@ -93,6 +125,18 @@ Pattern matching is necessary but not sufficient. A match that passes all charac
 ### Allowlist is suppress-on-match, not disable
 
 The allowlist does not disable patterns. Every pattern runs on every file regardless of allowlist contents. A suppressed finding still appears in the scan result internally — it is just excluded from the final `findings` array and exit code calculation. This ensures allowlists are validated against actual findings and stale entries are detected.
+
+### Baseline suppression with fingerprints
+
+The baseline uses `fp-`-prefixed SHA-256 fingerprints derived from `(pattern_id, file, line)` to identify findings across scans. When `--baseline` is passed, findings whose fingerprint matches a baseline entry are moved to `baselined_findings` rather than `findings`. They do not influence the exit code. Baseline entries record `first_seen` and `last_seen` timestamps, which are propagated back into the `Finding` object during `apply_enriched()`.
+
+### Offline verification with heuristics
+
+The `--verify` flag runs heuristic checks on matched key bodies to classify them as `likely-valid` or `test-key`. Checks include: key body entropy relative to provider norms, known test-key prefixes, repeated-character ratio, and sequential-digit ratio. No network calls are made. This keeps the tool safe in air-gapped environments and prevents accidental key validation traffic.
+
+### Hash cache for large repositories
+
+When `--cache-file` is given, sf-keyaudit computes a SHA-256 hash of each file before scanning. If the hash matches a prior run's cache entry and the finding count was zero, the file is skipped. The cache is flushed atomically after the scan completes. `cached_files_skipped` in `ScanMetrics` shows the savings.
 
 ### Context-sensitive patterns
 
@@ -166,6 +210,15 @@ Black-box tests using `assert_cmd` that invoke the compiled binary:
 - Single file scan
 - `--output` flag
 - Symlink traversal (Unix and Windows, with graceful skip when OS privileges are unavailable)
+- `--staged` and `--since-commit` (with a temporary git repository fixture)
+- `--generate-baseline`, `--baseline`, `--prune-baseline`
+- `--verify` validation_status values
+- `--owners` enrichment from a synthetic CODEOWNERS file
+- `--scan-archives` zip extraction
+- `--cache-file` skipping on second scan
+- `--format text` and `--group-by` output shape
+- Custom rules via `.sfkeyaudit.yaml`
+- Severity overrides via config
 
 ```sh
 cargo test                       # run all tests

@@ -22,9 +22,9 @@ pub struct Cli {
     #[arg(short = 'o', long, value_name = "FILE")]
     pub output: Option<PathBuf>,
 
-    /// Output format.
-    #[arg(long, value_name = "FORMAT", default_value = "json")]
-    pub format: OutputFormatArg,
+    /// Output format.  Default: `json` (or `default_format` from config file).
+    #[arg(long, value_name = "FORMAT")]
+    pub format: Option<OutputFormatArg>,
 
     /// Stop on the first finding instead of scanning all files.
     #[arg(long)]
@@ -72,6 +72,114 @@ pub struct Cli {
     /// Print each file path as it is scanned.
     #[arg(short = 'v', long)]
     pub verbose: bool,
+
+    /// Path to a project configuration file (`.sfkeyaudit.yaml`).
+    /// If omitted, sf-keyaudit searches for the config file starting from PATH
+    /// and walking up to the filesystem root.
+    #[arg(long, value_name = "FILE")]
+    pub config: Option<PathBuf>,
+
+    /// Number of parallel scan threads.  Default: number of logical CPU cores.
+    #[arg(long, value_name = "N")]
+    pub threads: Option<usize>,
+
+    /// After scanning, write a baseline file to FILE containing the fingerprints
+    /// of all high-confidence findings.  Use `--baseline` in subsequent runs to
+    /// suppress these findings.
+    #[arg(long, value_name = "FILE")]
+    pub generate_baseline: Option<PathBuf>,
+
+    /// Compare findings against a previously generated baseline file.
+    /// Findings whose fingerprints appear in the baseline are moved to
+    /// `baselined_findings` and do not trigger a non-zero exit code.
+    #[arg(long, value_name = "FILE")]
+    pub baseline: Option<PathBuf>,
+
+    /// Scan only files that have been staged for commit (`git diff --staged`).
+    /// Requires the scan path to be inside a git repository.
+    #[arg(long, conflicts_with = "diff_base")]
+    pub staged: bool,
+
+    /// Scan only files changed since GIT_REF (`git diff <GIT_REF>`).
+    /// Requires the scan path to be inside a git repository.
+    /// Conflicts with `--staged`.
+    #[arg(long, value_name = "GIT_REF", conflicts_with = "staged")]
+    pub diff_base: Option<String>,
+
+    /// Scan all files changed between COMMIT_REF and HEAD.
+    ///
+    /// Useful for scanning a whole PR branch: `--since-commit origin/main`.
+    /// Conflicts with `--staged` and `--diff-base`.
+    #[arg(
+        long,
+        value_name = "COMMIT_REF",
+        conflicts_with_all = &["staged", "diff_base"]
+    )]
+    pub since_commit: Option<String>,
+
+    /// Scan every file ever touched in the full git history (all branches).
+    ///
+    /// WARNING: may be very slow on large repos.  Conflicts with `--staged`,
+    /// `--diff-base`, and `--since-commit`.
+    #[arg(
+        long,
+        conflicts_with_all = &["staged", "diff_base", "since_commit"]
+    )]
+    pub history: bool,
+
+    /// Apply offline heuristic validation to each finding and annotate its
+    /// `validation_status` field ("likely-valid", "test-key", etc.).
+    #[arg(long)]
+    pub verify: bool,
+
+    /// Group output by the specified field.
+    ///
+    /// Valid values: `file`, `provider`, `severity`.
+    /// Only affects `--format text` output.
+    #[arg(long, value_name = "FIELD")]
+    pub group_by: Option<GroupByArg>,
+
+    /// Enrich findings with CODEOWNERS matches and git-blame author information.
+    ///
+    /// Requires the scan path to be inside a git repository that has a
+    /// CODEOWNERS file.
+    #[arg(long)]
+    pub owners: bool,
+
+    /// Also scan inside zip and tar/tgz archives found during the walk.
+    #[arg(long)]
+    pub scan_archives: bool,
+
+    /// Load and save a hash-based scan cache to FILE.  Files whose content
+    /// hash matches the cache are skipped, dramatically speeding up repeated
+    /// scans over large, mostly-unchanged trees.
+    #[arg(long, value_name = "FILE")]
+    pub cache_file: Option<PathBuf>,
+
+    /// Remove stale entries from the baseline before writing it.  A stale
+    /// entry is one whose fingerprint no longer appears in the current scan
+    /// results.  Requires `--generate-baseline`.
+    #[arg(long, requires = "generate_baseline")]
+    pub prune_baseline: bool,
+
+    /// Record who approved the baseline.  Sets `approved_by` and `approved_at`
+    /// on every entry in the generated baseline file.  Requires
+    /// `--generate-baseline`.  Can also be supplied via the
+    /// `SFKEYAUDIT_APPROVED_BY` environment variable.
+    #[arg(long, value_name = "NAME", requires = "generate_baseline")]
+    pub baseline_approved_by: Option<String>,
+
+    /// Subcommand (e.g. `install-hooks`).
+    #[command(subcommand)]
+    pub command: Option<SfSubcommand>,
+}
+
+/// Accepted values for the `--group-by` argument.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum GroupByArg {
+    File,
+    Provider,
+    Severity,
 }
 
 /// Accepted values for the `--format` argument.
@@ -79,6 +187,23 @@ pub struct Cli {
 pub enum OutputFormatArg {
     Json,
     Sarif,
+    Text,
+}
+
+/// Subcommands for sf-keyaudit.
+#[derive(Debug, clap::Subcommand)]
+pub enum SfSubcommand {
+    /// Install sf-keyaudit git hooks (pre-commit and pre-push).
+    ///
+    /// Installs hook scripts into `.git/hooks/` so that every commit and push
+    /// is automatically scanned for exposed credentials.
+    InstallHooks {
+        /// Repository root to install hooks into (defaults to the current directory).
+        path: Option<PathBuf>,
+        /// Overwrite existing hooks without prompting.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 impl Cli {
@@ -100,6 +225,7 @@ impl From<OutputFormatArg> for crate::types::OutputFormat {
         match a {
             OutputFormatArg::Json => crate::types::OutputFormat::Json,
             OutputFormatArg::Sarif => crate::types::OutputFormat::Sarif,
+            OutputFormatArg::Text => crate::types::OutputFormat::Text,
         }
     }
 }
@@ -134,13 +260,13 @@ mod tests {
     #[test]
     fn format_defaults_to_json() {
         let cli = parse(&[]);
-        assert_eq!(cli.format, OutputFormatArg::Json);
+        assert_eq!(cli.format, None);
     }
 
     #[test]
     fn format_sarif() {
         let cli = parse(&["--format", "sarif"]);
-        assert_eq!(cli.format, OutputFormatArg::Sarif);
+        assert_eq!(cli.format, Some(OutputFormatArg::Sarif));
     }
 
     #[test]
@@ -228,5 +354,61 @@ mod tests {
         use crate::types::OutputFormat;
         assert_eq!(OutputFormat::from(OutputFormatArg::Json), OutputFormat::Json);
         assert_eq!(OutputFormat::from(OutputFormatArg::Sarif), OutputFormat::Sarif);
+        assert_eq!(OutputFormat::from(OutputFormatArg::Text), OutputFormat::Text);
+    }
+
+    #[test]
+    fn format_text() {
+        let cli = parse(&["--format", "text"]);
+        assert_eq!(cli.format, Some(OutputFormatArg::Text));
+    }
+
+    #[test]
+    fn threads_flag() {
+        let cli = parse(&["--threads", "4"]);
+        assert_eq!(cli.threads, Some(4));
+    }
+
+    #[test]
+    fn threads_default_is_none() {
+        let cli = parse(&[]);
+        assert!(cli.threads.is_none());
+    }
+
+    #[test]
+    fn generate_baseline_flag() {
+        let cli = parse(&["--generate-baseline", "baseline.json"]);
+        assert_eq!(cli.generate_baseline, Some(PathBuf::from("baseline.json")));
+    }
+
+    #[test]
+    fn baseline_flag() {
+        let cli = parse(&["--baseline", "baseline.json"]);
+        assert_eq!(cli.baseline, Some(PathBuf::from("baseline.json")));
+    }
+
+    #[test]
+    fn staged_flag() {
+        let cli = parse(&["--staged"]);
+        assert!(cli.staged);
+    }
+
+    #[test]
+    fn diff_base_flag() {
+        let cli = parse(&["--diff-base", "main"]);
+        assert_eq!(cli.diff_base, Some("main".to_string()));
+    }
+
+    #[test]
+    fn staged_and_diff_base_conflict() {
+        // clap should reject --staged with --diff-base
+        let result = Cli::try_parse_from(["sf-keyaudit", "--staged", "--diff-base", "main"]);
+        assert!(result.is_err(), "staged and diff-base should conflict");
+    }
+
+    #[test]
+    fn config_flag() {
+        let cli = parse(&["--config", "custom.yaml"]);
+        assert_eq!(cli.config, Some(PathBuf::from("custom.yaml")));
     }
 }

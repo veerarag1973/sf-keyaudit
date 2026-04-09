@@ -8,7 +8,19 @@
 //! file worth of data is live per CPU thread rather than all files at once.
 
 use crate::scanner::DEFAULT_MAX_FILE_SIZE;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
+
+/// Archive file extensions that can be expanded when `scan_archives` is enabled.
+const ARCHIVE_EXTS: &[&str] = &["zip", "tar", "gz", "tgz", "bz2", "xz"];
+
+fn is_archive_path(path: &Path) -> bool {
+    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+        ARCHIVE_EXTS.contains(&ext.to_lowercase().as_str())
+    } else {
+        false
+    }
+}
 
 /// Configuration for the directory walker.
 #[derive(Debug, Clone)]
@@ -23,6 +35,16 @@ pub struct WalkConfig {
     pub extra_ignore_files: Vec<String>,
     /// Follow symbolic links during traversal.  Defaults to `false`.
     pub follow_links: bool,
+    /// Additional gitignore-style patterns (from `project_config.ignore_patterns`).
+    /// These are written to a temporary file and passed to the ignore builder.
+    pub extra_patterns: Vec<String>,
+    /// Gitignore-style patterns that whitelist files for scanning
+    /// (from `project_config.include_patterns`).  When non-empty, only files
+    /// whose path matches at least one pattern are yielded.
+    pub include_patterns: Vec<String>,
+    /// Whether archive files (.zip, .tar, .tar.gz, .tgz) should be yielded
+    /// as scannable entries rather than being silently skipped.
+    pub scan_archives: bool,
 }
 
 impl Default for WalkConfig {
@@ -33,6 +55,9 @@ impl Default for WalkConfig {
             no_ignore: false,
             extra_ignore_files: vec![],
             follow_links: false,
+            extra_patterns: vec![],
+            include_patterns: vec![],
+            scan_archives: false,
         }
     }
 }
@@ -92,6 +117,29 @@ pub fn walk(root: &Path, config: &WalkConfig) -> Vec<WalkEntry> {
         builder.add_ignore(path);
     }
 
+    // Extra gitignore-style patterns from project config — write to a temp
+    // file and register it with the builder.  We keep _pattern_tmpfile alive
+    // in scope until after builder.build() has finished iterating.
+    let _pattern_tmpfile: Option<tempfile::NamedTempFile> = if config.extra_patterns.is_empty() {
+        None
+    } else {
+        match tempfile::Builder::new()
+            .prefix(".sfkeyaudit-ignore")
+            .suffix(".gitignore")
+            .tempfile()
+        {
+            Ok(mut f) => {
+                for pat in &config.extra_patterns {
+                    let _ = writeln!(f, "{pat}");
+                }
+                let _ = f.flush();
+                builder.add_ignore(f.path());
+                Some(f)
+            }
+            Err(_) => None, // silently fall back — patterns not applied
+        }
+    };
+
     // Also look for .sfignore in the root.
     let sfignore = root.join(".sfignore");
     if sfignore.exists() {
@@ -149,8 +197,36 @@ pub fn walk(root: &Path, config: &WalkConfig) -> Vec<WalkEntry> {
             continue;
         }
 
+        // Archive files are only returned when scan_archives is enabled.
+        // Without the flag they are silently skipped so normal scans are not
+        // cluttered with binary archive entries.
+        if is_archive_path(&path) && !config.scan_archives {
+            continue;
+        }
+
         // File is within limits — emit a scannable entry (no content yet).
         entries.push(WalkEntry { path, warning: None });
+    }
+
+    // ── Include-pattern filtering ─────────────────────────────────────────────
+    // When include_patterns is non-empty, keep only entries whose path matches
+    // at least one pattern (gitignore-style).  Warning entries are always kept
+    // so they can be reported to stderr regardless of include filtering.
+    if !config.include_patterns.is_empty() {
+        let mut gb = ignore::gitignore::GitignoreBuilder::new(root);
+        for pat in &config.include_patterns {
+            let _ = gb.add_line(None, pat);
+        }
+        if let Ok(matcher) = gb.build() {
+            entries.retain(|e| {
+                // Always keep warning entries.
+                if e.warning.is_some() {
+                    return true;
+                }
+                // Keep the entry only if the path matches a pattern.
+                matcher.matched(&e.path, false).is_ignore()
+            });
+        }
     }
 
     entries

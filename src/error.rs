@@ -23,12 +23,16 @@ pub enum AuditError {
     #[error("Configuration error: {0}")]
     Config(String),
 
-    /// A regex pattern failed to compile (internal error — patterns are static).
+    /// A regex pattern failed to compile.
     #[error("Internal pattern compile error for '{id}': {source}")]
     PatternCompile {
-        id: &'static str,
+        id: String,
         source: fancy_regex::Error,
     },
+
+    /// A git command failed or git is not available.
+    #[error("Git error: {0}")]
+    GitError(String),
 
     /// JSON serialisation failed.
     #[error("Failed to serialize output: {0}")]

@@ -40,6 +40,24 @@ The workflow fails (exit 1) the moment a key is found. Use `--fail-fast` to get 
 
 ---
 
+### Incremental scan on pull requests
+
+Scan only the files changed in a PR rather than the entire repository. This is significantly faster for large codebases and reduces noise from pre-existing findings covered by a baseline.
+
+```yaml
+      - name: Incremental scan (changed files only)
+        run: |
+          sf-keyaudit \
+            --since-commit origin/main \
+            --baseline .sfkeyaudit-baseline.json \
+            --quiet \
+            .
+```
+
+`--since-commit origin/main` restricts the scan to files modified relative to the merge base. Combine with `--baseline` to suppress pre-existing findings that were already reviewed.
+
+---
+
 ### Upload SARIF to GitHub Code Scanning
 
 ```yaml
@@ -81,6 +99,31 @@ Results appear in the **Security → Code scanning** tab. Findings are annotated
 
 ---
 
+### Cache the scan hash database
+
+The `--cache-file` flag persists a SHA-256 hash database so unchanged files are skipped on subsequent runs. Store the cache file between workflow runs with `actions/cache`:
+
+```yaml
+      - name: Restore scan cache
+        uses: actions/cache@v4
+        with:
+          path: .sfkeyaudit-cache.json
+          key: sf-keyaudit-cache-${{ runner.os }}-${{ github.ref }}
+          restore-keys: sf-keyaudit-cache-${{ runner.os }}-
+
+      - name: Scan with hash cache
+        run: |
+          sf-keyaudit \
+            --cache-file .sfkeyaudit-cache.json \
+            --format sarif \
+            --output results.sarif \
+            . || true
+```
+
+`cached_files_skipped` in the JSON metrics block shows how many files were skipped thanks to the cache.
+
+---
+
 ### Cache the compiled binary
 
 Building sf-keyaudit from source takes ~30 seconds. Cache it between runs:
@@ -101,6 +144,52 @@ Building sf-keyaudit from source takes ~30 seconds. Cache it between runs:
             cargo install sf-keyaudit
           fi
 ```
+
+---
+
+### Baseline workflow
+
+Use a baseline to suppress pre-existing findings so new additions are immediately visible without noise from a legacy codebase.
+
+**Step 1 — generate baseline on the main branch (run once):**
+
+```yaml
+      - name: Generate initial baseline
+        run: |
+          sf-keyaudit --generate-baseline .sfkeyaudit-baseline.json .
+          git add .sfkeyaudit-baseline.json
+          git commit -m "chore: add sf-keyaudit baseline"
+          git push
+```
+
+**Step 2 — use baseline on every PR:**
+
+```yaml
+      - name: Scan with baseline
+        run: |
+          sf-keyaudit \
+            --baseline .sfkeyaudit-baseline.json \
+            --since-commit origin/main \
+            --quiet \
+            .
+```
+
+**Step 3 — prune stale baseline entries periodically (e.g. nightly):**
+
+```yaml
+      - name: Prune baseline
+        run: |
+          sf-keyaudit --prune-baseline .sfkeyaudit-baseline.json .
+          if git diff --quiet .sfkeyaudit-baseline.json; then
+            echo "Baseline unchanged"
+          else
+            git add .sfkeyaudit-baseline.json
+            git commit -m "chore: prune stale baseline entries"
+            git push
+          fi
+```
+
+See [docs/baseline.md](baseline.md) for the full baseline lifecycle.
 
 ---
 
@@ -277,6 +366,8 @@ cargo build --release
 
 | Stage | Command | On failure |
 |---|---|---|
-| PR check (fast) | `sf-keyaudit --fail-fast --quiet .` | Block merge |
-| Nightly full scan | `sf-keyaudit --format sarif --output results.sarif .` | Open ticket |
+| PR check — new findings only | `sf-keyaudit --since-commit origin/main --baseline .sfkeyaudit-baseline.json --quiet .` | Block merge |
+| PR check — fast full scan | `sf-keyaudit --fail-fast --quiet .` | Block merge |
+| Nightly full scan | `sf-keyaudit --format sarif --output results.sarif --cache-file .sf-cache.json .` | Open ticket |
 | Post-merge gate | `sf-keyaudit --allowlist .sfkeyaudit-allow.yaml --quiet .` | Alert on-call |
+| Baseline prune (weekly) | `sf-keyaudit --prune-baseline .sfkeyaudit-baseline.json .` | Commit updated baseline |

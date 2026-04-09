@@ -16,7 +16,7 @@ mod tests {
         Report {
             scan_id: "test-scan-id".into(),
             tool: "sf-keyaudit".into(),
-            version: "1.0.0".into(),
+            version: "2.0.0".into(),
             timestamp: "2026-04-03T10:00:00Z".into(),
             scan_root: "/home/app".into(),
             files_scanned: 42,
@@ -31,6 +31,7 @@ mod tests {
                 4.87,
             )],
             low_confidence_findings: vec![],
+            baselined_findings: vec![],
             summary: Summary {
                 total_findings: 1,
                 by_provider: {
@@ -40,6 +41,7 @@ mod tests {
                 },
                 files_with_findings: 1,
             },
+            metrics: crate::types::ScanMetrics::default(),
         }
     }
 
@@ -105,7 +107,42 @@ mod tests {
         let val: serde_json::Value = serde_json::from_str(&json).unwrap();
         let findings = val["findings"].as_array().unwrap();
         for f in findings {
-            assert_eq!(f["severity"].as_str().unwrap(), "critical");
+            let sev = f["severity"].as_str().unwrap();
+            assert!(
+                ["critical", "high", "medium"].contains(&sev),
+                "severity must be critical/high/medium, got: {sev}"
+            );
         }
+    }
+
+    #[test]
+    fn findings_have_fingerprint_field() {
+        let report = sample_report();
+        let json = render(&report).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let f = &val["findings"][0];
+        let fp = f["fingerprint"].as_str().unwrap();
+        assert!(fp.starts_with("fp-"), "fingerprint must start with 'fp-': {fp}");
+        assert_eq!(fp.len(), 19, "fingerprint must be 19 chars: {fp}");
+    }
+
+    #[test]
+    fn report_has_metrics_field() {
+        let report = sample_report();
+        let json = render(&report).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(val.get("metrics").is_some(), "report must have 'metrics' field");
+    }
+
+    #[test]
+    fn metrics_contains_expected_fields() {
+        let report = sample_report();
+        let json = render(&report).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let metrics = &val["metrics"];
+        assert!(metrics.get("scan_duration_ms").is_some());
+        assert!(metrics.get("files_skipped").is_some());
+        assert!(metrics.get("suppressed_count").is_some());
+        assert!(metrics.get("baselined_count").is_some());
     }
 }

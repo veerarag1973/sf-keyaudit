@@ -631,3 +631,361 @@ fn with_follow_links_windows_symlinked_dir_is_traversed() {
         .failure()
         .code(1);
 }
+
+// ── v2.0.0: fingerprints ──────────────────────────────────────────────────────
+
+#[test]
+fn fingerprint_field_in_finding_starts_with_fp() {
+    let dir = setup();
+    let key = "sk-xK9pQm7vL3nRwT5yJbHfDcGsEaZuViYo4W8MiNqX2Pe5AbcD";
+    write(&dir, "config.py", format!("KEY='{key}'\n").as_bytes());
+    let output = cmd().arg(dir.path()).output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let findings = v["findings"].as_array().unwrap();
+    assert!(!findings.is_empty());
+    let fp = findings[0]["fingerprint"].as_str().unwrap();
+    assert!(fp.starts_with("fp-"), "fingerprint must start with 'fp-', got: {fp}");
+    assert_eq!(fp.len(), 19, "fingerprint must be 'fp-' + 16 hex chars, got: {fp}");
+}
+
+#[test]
+fn fingerprint_is_stable_across_scans() {
+    let dir = setup();
+    let key = "sk-xK9pQm7vL3nRwT5yJbHfDcGsEaZuViYo4W8MiNqX2Pe5AbcD";
+    write(&dir, "config.py", format!("KEY='{key}'\n").as_bytes());
+
+    let run1 = cmd().arg(dir.path()).output().unwrap();
+    let run2 = cmd().arg(dir.path()).output().unwrap();
+
+    let v1: serde_json::Value = serde_json::from_str(&String::from_utf8(run1.stdout).unwrap()).unwrap();
+    let v2: serde_json::Value = serde_json::from_str(&String::from_utf8(run2.stdout).unwrap()).unwrap();
+
+    let fp1 = v1["findings"][0]["fingerprint"].as_str().unwrap();
+    let fp2 = v2["findings"][0]["fingerprint"].as_str().unwrap();
+    assert_eq!(fp1, fp2, "fingerprint must be identical across repeated scans");
+}
+
+// ── v2.0.0: remediation ───────────────────────────────────────────────────────
+
+#[test]
+fn remediation_field_in_finding_is_non_empty() {
+    let dir = setup();
+    let key = "sk-xK9pQm7vL3nRwT5yJbHfDcGsEaZuViYo4W8MiNqX2Pe5AbcD";
+    write(&dir, "config.py", format!("KEY='{key}'\n").as_bytes());
+    let output = cmd().arg(dir.path()).output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let findings = v["findings"].as_array().unwrap();
+    assert!(!findings.is_empty());
+    let remediation = findings[0]["remediation"].as_str().unwrap_or("");
+    assert!(!remediation.is_empty(), "remediation must be non-empty for built-in provider findings");
+}
+
+// ── v2.0.0: severity ─────────────────────────────────────────────────────────
+
+#[test]
+fn openai_key_severity_is_critical() {
+    let dir = setup();
+    let key = "sk-xK9pQm7vL3nRwT5yJbHfDcGsEaZuViYo4W8MiNqX2Pe5AbcD";
+    write(&dir, "config.py", format!("KEY='{key}'\n").as_bytes());
+    let output = cmd().arg(dir.path()).output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let findings = v["findings"].as_array().unwrap();
+    assert!(!findings.is_empty());
+    let severity = findings[0]["severity"].as_str().unwrap();
+    assert_eq!(severity, "critical", "OpenAI key severity must be critical");
+}
+
+#[test]
+fn groq_key_severity_is_high() {
+    let dir = setup();
+    write(
+        &dir,
+        "model.py",
+        b"client = Groq(api_key='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')\n",
+    );
+    let output = cmd().arg(dir.path()).output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let findings = v["findings"].as_array().unwrap();
+    assert!(!findings.is_empty(), "groq key must be detected");
+    let severity = findings[0]["severity"].as_str().unwrap();
+    assert_eq!(severity, "high", "groq key severity must be high");
+}
+
+// ── v2.0.0: metrics ──────────────────────────────────────────────────────────
+
+#[test]
+fn metrics_field_in_json_output() {
+    let dir = setup();
+    write(&dir, "clean.py", b"x = 1\n");
+    let output = cmd().arg(dir.path()).output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(v.get("metrics").is_some(), "report must have metrics field");
+    let metrics = &v["metrics"];
+    assert!(metrics.get("scan_duration_ms").is_some(), "metrics must have scan_duration_ms");
+    assert!(metrics.get("files_skipped").is_some(), "metrics must have files_skipped");
+    assert!(metrics.get("total_raw_matches").is_some(), "metrics must have total_raw_matches");
+}
+
+#[test]
+fn metrics_scan_duration_is_non_negative() {
+    let dir = setup();
+    write(&dir, "a.py", b"x=1\n");
+    write(&dir, "b.py", b"y=2\n");
+    let output = cmd().arg(dir.path()).output().unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let ms = v["metrics"]["scan_duration_ms"].as_u64().unwrap();
+    // Duration might be 0 on fast systems but never negative
+    let _ = ms; // just verify it parses as u64 (non-negative)
+}
+
+// ── v2.0.0: --format text ─────────────────────────────────────────────────────
+
+#[test]
+fn text_format_output_contains_tool_name() {
+    let dir = setup();
+    write(&dir, "clean.py", b"x = 1\n");
+    let output = cmd()
+        .args([dir.path().to_str().unwrap(), "--format", "text"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("sf-keyaudit"), "text output must contain tool name");
+}
+
+#[test]
+fn text_format_finding_shows_fingerprint() {
+    let dir = setup();
+    let key = "sk-xK9pQm7vL3nRwT5yJbHfDcGsEaZuViYo4W8MiNqX2Pe5AbcD";
+    write(&dir, "config.py", format!("KEY='{key}'\n").as_bytes());
+    let output = cmd()
+        .args([dir.path().to_str().unwrap(), "--format", "text"])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("fp-"), "text output must show fingerprint for findings");
+}
+
+// ── v2.0.0: --threads ────────────────────────────────────────────────────────
+
+#[test]
+fn threads_flag_does_not_crash() {
+    let dir = setup();
+    write(&dir, "clean.py", b"x = 1\n");
+    cmd()
+        .args([dir.path().to_str().unwrap(), "--threads", "2"])
+        .assert()
+        .success()
+        .code(0);
+}
+
+#[test]
+fn threads_flag_with_findings_still_exits_1() {
+    let dir = setup();
+    let key = "sk-xK9pQm7vL3nRwT5yJbHfDcGsEaZuViYo4W8MiNqX2Pe5AbcD";
+    write(&dir, "config.py", format!("KEY='{key}'\n").as_bytes());
+    cmd()
+        .args([dir.path().to_str().unwrap(), "--threads", "4"])
+        .assert()
+        .failure()
+        .code(1);
+}
+
+// ── v2.0.0: --generate-baseline / --baseline ─────────────────────────────────
+
+#[test]
+fn generate_baseline_creates_json_file() {
+    let dir = setup();
+    let key = "sk-xK9pQm7vL3nRwT5yJbHfDcGsEaZuViYo4W8MiNqX2Pe5AbcD";
+    write(&dir, "config.py", format!("KEY='{key}'\n").as_bytes());
+    let baseline_path = dir.path().join("baseline.json");
+
+    cmd()
+        .arg(dir.path())
+        .args(["--generate-baseline", baseline_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(baseline_path.exists(), "baseline file must be created");
+    let content = fs::read_to_string(&baseline_path).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&content).expect("baseline must be valid JSON");
+    assert!(v.get("fingerprints").is_some(), "baseline must have fingerprints field");
+    // Since v2.1 the fingerprints field is a JSON object (map), not an array.
+    let fps = v["fingerprints"].as_object().unwrap();
+    assert!(!fps.is_empty(), "baseline fingerprints must not be empty");
+    assert!(
+        fps.keys().next().unwrap().starts_with("fp-"),
+        "baseline fingerprint keys must start with 'fp-'"
+    );
+}
+
+#[test]
+fn baseline_suppresses_finding_exits_0() {
+    let dir = setup();
+    let key = "sk-xK9pQm7vL3nRwT5yJbHfDcGsEaZuViYo4W8MiNqX2Pe5AbcD";
+    write(&dir, "config.py", format!("KEY='{key}'\n").as_bytes());
+    let baseline_path = dir.path().join("baseline.json");
+
+    // First scan: generate the baseline (exits 1 because finding is present)
+    cmd()
+        .arg(dir.path())
+        .args(["--generate-baseline", baseline_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(baseline_path.exists(), "baseline file must be created after first scan");
+
+    // Second scan: apply the baseline — finding is suppressed → exit 0
+    cmd()
+        .arg(dir.path())
+        .args(["--baseline", baseline_path.to_str().unwrap()])
+        .assert()
+        .code(0);
+}
+
+#[test]
+fn baselined_findings_appear_in_json_report() {
+    let dir = setup();
+    let key = "sk-xK9pQm7vL3nRwT5yJbHfDcGsEaZuViYo4W8MiNqX2Pe5AbcD";
+    write(&dir, "config.py", format!("KEY='{key}'\n").as_bytes());
+    let baseline_path = dir.path().join("baseline.json");
+
+    // Generate baseline
+    cmd()
+        .arg(dir.path())
+        .args(["--generate-baseline", baseline_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    // Second scan with baseline applied
+    let output = cmd()
+        .arg(dir.path())
+        .args(["--baseline", baseline_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    assert!(v.get("baselined_findings").is_some(), "report must have baselined_findings field");
+    let baselined = v["baselined_findings"].as_array().unwrap();
+    assert!(
+        !baselined.is_empty(),
+        "baselined_findings must contain the suppressed finding"
+    );
+    // The main findings array must be empty (all suppressed)
+    assert_eq!(
+        v["findings"].as_array().unwrap().len(),
+        0,
+        "findings must be empty when all are baselined"
+    );
+}
+
+#[test]
+fn new_finding_after_baseline_still_exits_1() {
+    let dir = setup();
+    let key = "sk-xK9pQm7vL3nRwT5yJbHfDcGsEaZuViYo4W8MiNqX2Pe5AbcD";
+    write(&dir, "config.py", format!("KEY='{key}'\n").as_bytes());
+    let baseline_path = dir.path().join("baseline.json");
+
+    // Generate baseline with only config.py (key at line 1)
+    cmd()
+        .arg(dir.path())
+        .args(["--generate-baseline", baseline_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    // Add a new file with the same key but at a different path → different fingerprint,
+    // so it is NOT suppressed by the baseline.
+    write(
+        &dir,
+        "new_secret.py",
+        format!("# added later\nKEY='{key}'\n").as_bytes(),
+    );
+
+    // Scan with baseline: config.py key is baselined, new_secret.py key is NEW → exits 1
+    cmd()
+        .arg(dir.path())
+        .args(["--baseline", baseline_path.to_str().unwrap()])
+        .assert()
+        .code(1);
+}
+
+// ── v2.0.0: --config (custom rules) ──────────────────────────────────────────
+
+#[test]
+fn config_file_custom_rule_detects_custom_pattern() {
+    let dir = setup();
+    // Write a file with a custom token
+    write(&dir, "app.env", b"TOKEN=MYAPP_A1B2C3D4E5F6G7H8I9J0\n");
+
+    // Write the config file with a custom rule
+    let config_yaml = r#"custom_rules:
+  - id: myapp-token-v1
+    provider: myapp
+    description: "MyApp API token"
+    pattern: "(?P<body>MYAPP_[A-Z0-9]{20})"
+    min_entropy: 2.0
+    severity: medium
+"#;
+    let config_path = dir.path().join("myapp.yaml");
+    fs::write(&config_path, config_yaml.as_bytes()).unwrap();
+
+    let output = cmd()
+        .arg(dir.path())
+        .args(["--config", config_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let total = v["summary"]["total_findings"].as_u64().unwrap_or(0);
+    assert!(total >= 1, "custom rule must detect the MYAPP_ token, got {total} findings");
+    let findings = v["findings"].as_array().unwrap();
+    let found_myapp = findings.iter().any(|f| f["provider"].as_str() == Some("myapp"));
+    assert!(found_myapp, "myapp provider must appear in findings");
+}
+
+#[test]
+fn config_file_custom_rule_severity_is_applied() {
+    let dir = setup();
+    write(&dir, "app.env", b"TOKEN=MYAPP_A1B2C3D4E5F6G7H8I9J0\n");
+
+    let config_yaml = r#"custom_rules:
+  - id: myapp-token-v1
+    provider: myapp
+    pattern: "(?P<body>MYAPP_[A-Z0-9]{20})"
+    severity: medium
+"#;
+    let config_path = dir.path().join("myapp.yaml");
+    fs::write(&config_path, config_yaml.as_bytes()).unwrap();
+
+    let output = cmd()
+        .arg(dir.path())
+        .args(["--config", config_path.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let findings = v["findings"].as_array().unwrap();
+    if !findings.is_empty() {
+        let severity = findings[0]["severity"].as_str().unwrap();
+        assert_eq!(severity, "medium", "custom rule severity override must apply");
+    }
+}
+
+// ── v2.0.0: --staged (git-aware) ─────────────────────────────────────────────
+
+#[test]
+fn staged_without_git_repo_exits_config_error() {
+    let dir = setup();
+    write(&dir, "clean.py", b"x=1\n");
+    // Running --staged outside a git repository must fail with exit code 2 (ConfigError)
+    cmd()
+        .arg(dir.path())
+        .arg("--staged")
+        .assert()
+        .code(2);
+}

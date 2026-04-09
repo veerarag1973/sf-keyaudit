@@ -1,5 +1,6 @@
 pub mod json;
 pub mod sarif;
+pub mod text;
 
 use crate::error::AuditError;
 use crate::types::{OutputFormat, Report};
@@ -14,6 +15,7 @@ pub fn render(
     let rendered = match format {
         OutputFormat::Json => json::render(report)?,
         OutputFormat::Sarif => sarif::render(report)?,
+        OutputFormat::Text => text::render(report)?,
     };
 
     match output_path {
@@ -39,17 +41,19 @@ mod tests {
         Report {
             scan_id: "test-id".to_string(),
             tool: "sf-keyaudit".to_string(),
-            version: "1.0.0".to_string(),
+            version: "2.0.0".to_string(),
             timestamp: "2024-01-01T00:00:00Z".to_string(),
             scan_root: "/tmp".to_string(),
             files_scanned: 0,
             findings: vec![],
             low_confidence_findings: vec![],
+            baselined_findings: vec![],
             summary: Summary {
                 total_findings: 0,
                 by_provider: HashMap::new(),
                 files_with_findings: 0,
             },
+            metrics: crate::types::ScanMetrics::default(),
         }
     }
 
@@ -62,13 +66,15 @@ mod tests {
         Report {
             scan_id: "test-id".to_string(),
             tool: "sf-keyaudit".to_string(),
-            version: "1.0.0".to_string(),
+            version: "2.0.0".to_string(),
             timestamp: "2024-01-01T00:00:00Z".to_string(),
             scan_root: "/tmp".to_string(),
             files_scanned: 1,
             summary: Summary::from_findings(&[f.clone()]),
             findings: vec![f],
             low_confidence_findings: vec![],
+            baselined_findings: vec![],
+            metrics: crate::types::ScanMetrics::default(),
         }
     }
 
@@ -88,6 +94,16 @@ mod tests {
         assert!(result.is_some());
         let s = result.unwrap();
         assert!(s.contains("2.1.0"));
+    }
+
+    #[test]
+    fn render_text_returns_some_string() {
+        let report = report_with_finding();
+        let result = render(&report, OutputFormat::Text, None).unwrap();
+        assert!(result.is_some());
+        let s = result.unwrap();
+        assert!(s.contains("sf-keyaudit"), "text output should contain tool name");
+        assert!(s.contains("openai"), "text output should contain provider");
     }
 
     #[test]

@@ -9,11 +9,20 @@ use serde_json::{json, Value};
 /// Render a [`Report`] as a SARIF 2.1.0 JSON string.
 pub fn render(report: &Report) -> Result<String, AuditError> {
     let rules: Vec<Value> = collect_rules(report);
-    let results: Vec<Value> = report
+    let mut results: Vec<Value> = report
         .findings
         .iter()
         .map(|f| finding_to_sarif_result(f, &report.scan_root))
         .collect();
+
+    // Baselined findings are emitted as suppressed results so that SARIF
+    // consumers (e.g. GitHub Code Scanning) can track them without raising alerts.
+    let suppressed: Vec<Value> = report
+        .baselined_findings
+        .iter()
+        .map(|f| finding_to_sarif_result_suppressed(f, &report.scan_root))
+        .collect();
+    results.extend(suppressed);
 
     let sarif = json!({
         "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
@@ -47,8 +56,17 @@ fn collect_rules(report: &Report) -> Vec<Value> {
     let mut seen = std::collections::HashSet::new();
     let mut rules = Vec::new();
 
-    for f in report.findings.iter().chain(report.low_confidence_findings.iter()) {
+    for f in report.findings.iter().chain(report.low_confidence_findings.iter()).chain(report.baselined_findings.iter()) {
         if seen.insert(f.pattern_id.clone()) {
+            let help_text = if let Some(ref rem) = f.remediation {
+                format!("Revoke and rotate the {} credential immediately. {}", f.provider, rem)
+            } else {
+                format!(
+                    "An exposed {} API key was detected (pattern: {}). \
+                     Remove the key and rotate it immediately.",
+                    f.provider, f.pattern_id
+                )
+            };
             rules.push(json!({
                 "id": f.pattern_id,
                 "name": f.pattern_id,
@@ -57,24 +75,34 @@ fn collect_rules(report: &Report) -> Vec<Value> {
                 },
                 "fullDescription": {
                     "text": format!(
-                        "An exposed {} API key was detected (pattern: {}). \
-                         This is a critical security finding. Remove the key and rotate it immediately.",
+                        "An exposed {} API key was detected (pattern: {}).",
                         f.provider, f.pattern_id
                     )
                 },
+                "help": {
+                    "text": help_text
+                },
                 "helpUri": "https://getspanforge.com/docs/sf-keyaudit",
                 "defaultConfiguration": {
-                    "level": "error"
+                    "level": severity_to_sarif_level(&f.severity)
                 },
                 "properties": {
                     "provider": f.provider,
-                    "severity": "critical",
+                    "severity": f.severity,
                     "tags": ["security", "api-key", "credentials"]
                 }
             }));
         }
     }
     rules
+}
+
+fn severity_to_sarif_level(severity: &str) -> &'static str {
+    match severity {
+        "medium" => "warning",
+        "high" | "critical" => "error",
+        _ => "error",
+    }
 }
 
 fn finding_to_sarif_result(
@@ -91,15 +119,97 @@ fn finding_to_sarif_result(
             .display()
     );
 
+    let mut properties = serde_json::json!({
+        "provider": f.provider,
+        "patternId": f.pattern_id,
+        "entropy": f.entropy,
+        "severity": f.severity,
+        "fingerprint": f.fingerprint
+    });
+    if let Some(ref vs) = f.validation_status {
+        properties["validationStatus"] = serde_json::json!(vs);
+    }
+    if let Some(ref owner) = f.owner {
+        properties["owner"] = serde_json::json!(owner);
+    }
+    if let Some(ref author) = f.last_author {
+        properties["lastAuthor"] = serde_json::json!(author);
+    }
+    if let Some(ref first) = f.first_seen {
+        properties["firstSeen"] = serde_json::json!(first);
+    }
+    if let Some(ref last) = f.last_seen {
+        properties["lastSeen"] = serde_json::json!(last);
+    }
+
     json!({
         "ruleId": f.pattern_id,
-        "level": "error",
+        "level": severity_to_sarif_level(&f.severity),
         "message": {
             "text": format!(
                 "Exposed {} API key found at {} (line {}). Match: {}",
                 f.provider, f.file, f.line, f.match_text
             )
         },
+        "fingerprints": {
+            "sfKeyaudit/v1": f.fingerprint
+        },
+        "locations": [
+            {
+                "physicalLocation": {
+                    "artifactLocation": {
+                        "uri": uri,
+                        "uriBaseId": "%SRCROOT%"
+                    },
+                    "region": {
+                        "startLine": f.line,
+                        "startColumn": f.column,
+                        "endLine": f.line
+                    }
+                }
+            }
+        ],
+        "properties": properties
+    })
+}
+
+/// Build a SARIF result for a baselined (suppressed) finding.
+///
+/// The result uses `"level": "none"` with a `suppressions` array so that
+/// consumers like GitHub Code Scanning show the finding as "dismissed".
+fn finding_to_sarif_result_suppressed(
+    f: &crate::types::Finding,
+    scan_root: &str,
+) -> Value {
+    let uri = format!(
+        "{}",
+        std::path::Path::new(scan_root)
+            .join(&f.file)
+            .display()
+    );
+    let suppression_kind = f
+        .suppression_provenance
+        .as_deref()
+        .unwrap_or("baseline");
+    json!({
+        "ruleId": f.pattern_id,
+        "level": "none",
+        "message": {
+            "text": format!(
+                "[Baselined] Exposed {} API key at {} (line {}).",
+                f.provider, f.file, f.line
+            )
+        },
+        "fingerprints": {
+            "sfKeyaudit/v1": f.fingerprint
+        },
+        "suppressions": [
+            {
+                "kind": "inSource",
+                "status": "accepted",
+                "justification": format!("suppressed by {}", suppression_kind)
+            }
+        ],
         "locations": [
             {
                 "physicalLocation": {
@@ -119,7 +229,8 @@ fn finding_to_sarif_result(
             "provider": f.provider,
             "patternId": f.pattern_id,
             "entropy": f.entropy,
-            "severity": f.severity
+            "severity": f.severity,
+            "fingerprint": f.fingerprint
         }
     })
 }
@@ -134,7 +245,7 @@ mod tests {
         Report {
             scan_id: "sarif-test-id".into(),
             tool: "sf-keyaudit".into(),
-            version: "1.0.0".into(),
+            version: "2.0.0".into(),
             timestamp: "2026-04-03T10:00:00Z".into(),
             scan_root: "/home/app".into(),
             files_scanned: 10,
@@ -149,6 +260,7 @@ mod tests {
                 4.87,
             )],
             low_confidence_findings: vec![],
+            baselined_findings: vec![],
             summary: Summary {
                 total_findings: 1,
                 by_provider: {
@@ -158,6 +270,7 @@ mod tests {
                 },
                 files_with_findings: 1,
             },
+            metrics: crate::types::ScanMetrics::default(),
         }
     }
 

@@ -23,6 +23,15 @@ pub struct RawFinding {
     /// If `false` the finding is below the entropy threshold and goes into
     /// `low_confidence_findings`.
     pub high_confidence: bool,
+    /// Severity level from the matched pattern: "critical", "high", or "medium".
+    pub severity: String,
+    /// Provider-specific remediation guidance from the matched pattern.
+    pub remediation: String,
+    /// Stable fingerprint derived from pattern_id + file + match_body.
+    pub fingerprint: String,
+    /// The raw, unredacted credential body — used only for network validation
+    /// during this scan run; never written to any Finding output field.
+    pub secret_body: String,
 }
 
 /// Scan the raw bytes / text of a single file against the provided patterns.
@@ -71,6 +80,10 @@ pub fn scan_content(
             // Compute 1-indexed line and column from byte offset in full content.
             let (line, col) = byte_offset_to_line_col(content, match_start);
 
+            // Fingerprint uses the raw body (not line number) so it survives
+            // line-number shifts when unrelated code is inserted above the secret.
+            let fingerprint = crate::fingerprint::compute(&pattern.id, relative_path, body);
+
             results.push(RawFinding {
                 provider: pattern.provider.to_string(),
                 file: relative_path.to_string(),
@@ -80,6 +93,10 @@ pub fn scan_content(
                 pattern_id: pattern.id.to_string(),
                 entropy,
                 high_confidence: entropy >= pattern.min_entropy,
+                severity: pattern.severity.clone(),
+                remediation: pattern.remediation.clone(),
+                fingerprint,
+                secret_body: body.to_string(),
             });
         }
     }
@@ -109,6 +126,201 @@ fn dedup_by_position(mut findings: Vec<RawFinding>) -> Vec<RawFinding> {
     let mut seen: std::collections::HashSet<(String, usize, usize)> = std::collections::HashSet::new();
     findings.retain(|f| seen.insert((f.file.clone(), f.line, f.column)));
     findings
+}
+
+// ── Jupyter notebook scanning ────────────────────────────────────────────────
+
+/// Scan a Jupyter notebook (`.ipynb`) file.
+///
+/// Extracts the source lines from every `code` cell, concatenates them into
+/// a synthetic text buffer, then runs the normal pattern scanner over that
+/// buffer.  Line offsets in findings are relative to the concatenated source,
+/// so they are approximate but useful for triage.
+pub fn scan_notebook_json(
+    relative_path: &str,
+    content: &str,
+    patterns: &[&Pattern],
+) -> Vec<RawFinding> {
+    // Parse the notebook JSON.  On any parse error return empty results
+    // rather than a hard error — broken notebooks should not fail a scan.
+    let nb: serde_json::Value = match serde_json::from_str(content) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+
+    let cells = match nb.get("cells").and_then(|v| v.as_array()) {
+        Some(c) => c,
+        None => return vec![],
+    };
+
+    let mut combined = String::new();
+    for cell in cells {
+        let cell_type = cell
+            .get("cell_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if cell_type != "code" {
+            continue;
+        }
+        let source = cell.get("source");
+        let lines = match source {
+            // source can be a single string or an array of strings.
+            Some(serde_json::Value::String(s)) => {
+                combined.push_str(s);
+                combined.push('\n');
+                continue;
+            }
+            Some(serde_json::Value::Array(arr)) => arr.clone(),
+            _ => continue,
+        };
+        for line in lines {
+            if let Some(s) = line.as_str() {
+                combined.push_str(s);
+            }
+        }
+        combined.push('\n'); // cell separator
+    }
+
+    if combined.is_empty() {
+        return vec![];
+    }
+
+    scan_content(relative_path, &combined, patterns)
+}
+
+// ── Archive scanning ─────────────────────────────────────────────────────────
+
+/// Scan files inside a `.zip` archive.
+///
+/// Returns the same [`RawFinding`] structure as [`scan_content`].  Paths in
+/// findings are `<archive_relative_path>!<entry_path>` so they remain
+/// unambiguous in the report.
+pub fn scan_archive_zip(
+    archive_path: &std::path::Path,
+    scan_root: &std::path::Path,
+    patterns: &[&Pattern],
+) -> Vec<RawFinding> {
+    let archive_rel = archive_path
+        .strip_prefix(scan_root)
+        .map(|p| p.display().to_string().replace('\\', "/"))
+        .unwrap_or_else(|_| archive_path.display().to_string());
+
+    let file = match std::fs::File::open(archive_path) {
+        Ok(f) => f,
+        Err(_) => return vec![],
+    };
+    let mut zip = match zip::ZipArchive::new(file) {
+        Ok(z) => z,
+        Err(_) => return vec![],
+    };
+
+    let mut all: Vec<RawFinding> = Vec::new();
+
+    for i in 0..zip.len() {
+        let mut entry = match zip.by_index(i) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if entry.is_dir() {
+            continue;
+        }
+        let entry_name = entry.name().to_string();
+        let virtual_path = format!("{archive_rel}!{entry_name}");
+
+        let mut buf = Vec::new();
+        use std::io::Read as _;
+        if entry.read_to_end(&mut buf).is_err() {
+            continue;
+        }
+        if is_binary(&buf) {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&buf).into_owned();
+        let mut findings = scan_content(&virtual_path, &text, patterns);
+        all.append(&mut findings);
+    }
+
+    all
+}
+
+/// Scan files inside a `.tar`, `.tar.gz`, or `.tgz` archive.
+pub fn scan_archive_tar(
+    archive_path: &std::path::Path,
+    scan_root: &std::path::Path,
+    patterns: &[&Pattern],
+) -> Vec<RawFinding> {
+    let archive_rel = archive_path
+        .strip_prefix(scan_root)
+        .map(|p| p.display().to_string().replace('\\', "/"))
+        .unwrap_or_else(|_| archive_path.display().to_string());
+
+    let file = match std::fs::File::open(archive_path) {
+        Ok(f) => f,
+        Err(_) => return vec![],
+    };
+
+    let ext = archive_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+
+    let mut all: Vec<RawFinding> = Vec::new();
+
+    // Determine if the archive is gzip-compressed.
+    let is_gz = ext == "gz" || ext == "tgz"
+        || archive_path
+            .to_string_lossy()
+            .to_lowercase()
+            .ends_with(".tar.gz");
+
+    if is_gz {
+        let gz = flate2::read::GzDecoder::new(file);
+        process_tar_entries(gz, &archive_rel, scan_root, patterns, &mut all);
+    } else {
+        process_tar_entries(file, &archive_rel, scan_root, patterns, &mut all);
+    }
+
+    all
+}
+
+fn process_tar_entries<R: std::io::Read>(
+    reader: R,
+    archive_rel: &str,
+    _scan_root: &std::path::Path,
+    patterns: &[&Pattern],
+    all: &mut Vec<RawFinding>,
+) {
+    use std::io::Read as _;
+    let mut archive = tar::Archive::new(reader);
+    let entries = match archive.entries() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry_result in entries {
+        let mut entry = match entry_result {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let path = match entry.path() {
+            Ok(p) => p.display().to_string(),
+            Err(_) => continue,
+        };
+        if path.ends_with('/') {
+            continue; // directory entry
+        }
+        let virtual_path = format!("{archive_rel}!{path}");
+        let mut buf = Vec::new();
+        if entry.read_to_end(&mut buf).is_err() {
+            continue;
+        }
+        if is_binary(&buf) {
+            continue;
+        }
+        let text = String::from_utf8_lossy(&buf).into_owned();
+        let mut findings = scan_content(&virtual_path, &text, patterns);
+        all.append(&mut findings);
+    }
 }
 
 #[cfg(test)]
@@ -348,6 +560,10 @@ mod tests {
             pattern_id: "openai-legacy-key-v1".into(),
             entropy: 4.5,
             high_confidence: true,
+            severity: "critical".into(),
+            remediation: String::new(),
+            fingerprint: "fp-aabbccddeeff".into(),
+            secret_body: "sk-realkey000".into(),
         };
         let f2 = RawFinding {
             provider: "stability-ai".into(),
@@ -358,6 +574,10 @@ mod tests {
             pattern_id: "stability-ai-key-v1".into(),
             entropy: 4.5,
             high_confidence: true,
+            severity: "high".into(),
+            remediation: String::new(),
+            fingerprint: "fp-112233445566".into(),
+            secret_body: "realkey000".into(),
         };
         let result = dedup_by_position(vec![f1, f2]);
         assert_eq!(result.len(), 1);
@@ -376,6 +596,10 @@ mod tests {
             pattern_id: "openai-legacy-key-v1".into(),
             entropy: 4.5,
             high_confidence: true,
+            severity: "critical".into(),
+            remediation: String::new(),
+            fingerprint: "fp-aabbccddeeff".into(),
+            secret_body: "sk-realkey000".into(),
         };
         let result = dedup_by_position(vec![make(1, 5), make(2, 5), make(1, 20)]);
         assert_eq!(result.len(), 3);
