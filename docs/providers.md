@@ -1,6 +1,6 @@
 # Providers
 
-sf-keyaudit detects credentials for 18 AI providers. Each provider maps to one or more **pattern IDs**.
+sf-keyaudit detects credentials for 24 providers. Each provider maps to one or more **pattern IDs**.
 
 Pattern IDs follow the naming convention `{provider}-{keytype}-v{N}`. The version suffix is incremented when a provider changes their key format, so existing allowlist entries remain identifiable after updates.
 
@@ -302,6 +302,178 @@ UUID format keys are too common to match without context.
 
 ---
 
+### Stripe — Live secret key
+
+| Field | Value |
+|---|---|
+| Provider slug | `stripe` |
+| Pattern ID | `stripe-live-secret-key-v1` |
+| Method | Prefix-match |
+| Prefix | `sk_live_` |
+| Body | 24–96 alphanumeric characters |
+| Min entropy | 3.5 bits/char |
+| Severity | critical |
+
+Live Stripe secret keys can charge real payment methods. Revoke immediately at <https://dashboard.stripe.com/apikeys>.
+
+---
+
+### Stripe — Restricted key
+
+| Field | Value |
+|---|---|
+| Provider slug | `stripe` |
+| Pattern ID | `stripe-restricted-key-v1` |
+| Method | Prefix-match |
+| Prefix | `rk_live_` |
+| Body | 24–96 alphanumeric characters |
+| Min entropy | 3.5 bits/char |
+| Severity | high |
+
+Restricted keys have scoped permissions. Revoke and regenerate with minimal required permissions.
+
+---
+
+### Slack — Bot token
+
+| Field | Value |
+|---|---|
+| Provider slug | `slack` |
+| Pattern ID | `slack-bot-token-v1` |
+| Method | Prefix-match |
+| Prefix | `xoxb-` |
+| Body | Two numeric segments + 24-28 alphanumeric characters |
+| Min entropy | 3.5 bits/char |
+
+OAuth bot tokens grant workspace API access. Revoke at <https://api.slack.com/apps> → OAuth & Permissions.
+
+---
+
+### Slack — User token
+
+| Field | Value |
+|---|---|
+| Provider slug | `slack` |
+| Pattern ID | `slack-user-token-v1` |
+| Method | Prefix-match |
+| Prefix | `xoxp-` |
+| Body | Three numeric segments + 32 hex characters |
+| Min entropy | 3.5 bits/char |
+
+OAuth user tokens act on behalf of a specific Slack user. Revoke via the same OAuth & Permissions page.
+
+---
+
+### GitHub — Fine-grained PAT
+
+| Field | Value |
+|---|---|
+| Provider slug | `github` |
+| Pattern ID | `github-fine-grained-pat-v1` |
+| Method | Prefix-match |
+| Prefix | `github_pat_` |
+| Body | Exactly 82 alphanumeric + `_` characters |
+| Min entropy | 4.0 bits/char |
+| Severity | critical |
+
+Fine-grained tokens have repository-scoped permissions. Revoke at <https://github.com/settings/tokens>.
+
+---
+
+### GitHub — Classic PAT
+
+| Field | Value |
+|---|---|
+| Provider slug | `github` |
+| Pattern ID | `github-classic-pat-v1` |
+| Method | Prefix-match |
+| Prefix | `ghp_` |
+| Body | Exactly 36 alphanumeric characters |
+| Min entropy | 3.5 bits/char |
+| Severity | critical |
+
+Classic tokens often have broad scopes. Revoke and migrate to fine-grained tokens.
+
+---
+
+### GitHub — OAuth token
+
+| Field | Value |
+|---|---|
+| Provider slug | `github` |
+| Pattern ID | `github-oauth-token-v1` |
+| Method | Prefix-match |
+| Prefix | `gho_` |
+| Body | Exactly 36 alphanumeric characters |
+| Min entropy | 3.5 bits/char |
+| Severity | high |
+
+OAuth application tokens. Revoke via the issuing app's settings or <https://github.com/settings/applications>.
+
+---
+
+### GitLab — Personal access token
+
+| Field | Value |
+|---|---|
+| Provider slug | `gitlab` |
+| Pattern ID | `gitlab-pat-v1` |
+| Method | Prefix-match |
+| Prefix | `glpat-` |
+| Body | Exactly 20 alphanumeric + `-_` characters |
+| Min entropy | 3.5 bits/char |
+| Severity | critical |
+
+Revoke at <https://gitlab.com/-/profile/personal_access_tokens> and regenerate with minimal scopes.
+
+---
+
+### SendGrid
+
+| Field | Value |
+|---|---|
+| Provider slug | `sendgrid` |
+| Pattern ID | `sendgrid-api-key-v1` |
+| Method | Prefix-match |
+| Prefix | `SG.` |
+| Body | 22-char Base64URL segment `.` 43-char Base64URL segment |
+| Min entropy | 4.0 bits/char |
+| Severity | high |
+
+Revoke at <https://app.sendgrid.com/settings/api_keys> and regenerate with minimal required permissions.
+
+---
+
+### Twilio — Account SID
+
+| Field | Value |
+|---|---|
+| Provider slug | `twilio` |
+| Pattern ID | `twilio-account-sid-v1` |
+| Method | Context-sensitive |
+| Context | `TWILIO_ACCOUNT_SID` or `ACCOUNT_SID` variable name (case-insensitive) |
+| Body | `AC` followed by 32 lowercase hex characters |
+| Min entropy | 3.0 bits/char |
+| Severity | high |
+
+---
+
+### Twilio — Auth Token
+
+| Field | Value |
+|---|---|
+| Provider slug | `twilio` |
+| Pattern ID | `twilio-auth-token-v1` |
+| Method | Context-sensitive |
+| Context | `TWILIO_AUTH_TOKEN` or `TWILIO_TOKEN` variable name (case-insensitive) |
+| Body | Exactly 32 lowercase hex characters |
+| Min entropy | 3.0 bits/char |
+| Severity | critical |
+
+Auth Tokens authenticate all Twilio REST API calls. Rotate at <https://console.twilio.com/> and invalidate all existing sessions.
+
+---
+
 ## Quick reference table
 
 | Provider slug | Pattern ID | Method | Prefix / Context |
@@ -326,3 +498,14 @@ UUID format keys are too common to match without context.
 | `elevenlabs` | `elevenlabs-api-key-v1` | Context | `xi-api-key:` / `ELEVENLABS_API_KEY=` |
 | `pinecone` | `pinecone-api-key-v1` | Context | `PINECONE_API_KEY=` |
 | `weaviate` | `weaviate-api-key-v1` | Context | `X-Weaviate-Api-Key:` / `WEAVIATE_API_KEY=` |
+| `stripe` | `stripe-live-secret-key-v1` | Prefix | `sk_live_` |
+| `stripe` | `stripe-restricted-key-v1` | Prefix | `rk_live_` |
+| `slack` | `slack-bot-token-v1` | Prefix | `xoxb-` |
+| `slack` | `slack-user-token-v1` | Prefix | `xoxp-` |
+| `github` | `github-fine-grained-pat-v1` | Prefix | `github_pat_` |
+| `github` | `github-classic-pat-v1` | Prefix | `ghp_` |
+| `github` | `github-oauth-token-v1` | Prefix | `gho_` |
+| `gitlab` | `gitlab-pat-v1` | Prefix | `glpat-` |
+| `sendgrid` | `sendgrid-api-key-v1` | Prefix | `SG.` |
+| `twilio` | `twilio-account-sid-v1` | Context | `TWILIO_ACCOUNT_SID=` |
+| `twilio` | `twilio-auth-token-v1` | Context | `TWILIO_AUTH_TOKEN=` |

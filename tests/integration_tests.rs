@@ -26,6 +26,15 @@ fn write(dir: &TempDir, name: &str, content: &[u8]) {
     fs::write(path, content).unwrap()
 }
 
+fn git(dir: &TempDir, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "git command failed: git {:?}", args);
+}
+
 // ── exit codes ───────────────────────────────────────────────────────────────
 
 #[test]
@@ -988,4 +997,44 @@ fn staged_without_git_repo_exits_config_error() {
         .arg("--staged")
         .assert()
         .code(2);
+}
+
+#[test]
+fn history_mode_finds_deleted_secret_from_git_history() {
+    let dir = setup();
+    let key = "sk-xK9pQm7vL3nRwT5yJbHfDcGsEaZuViYo4W8MiNqX2Pe5AbcD";
+
+    git(&dir, &["init"]);
+    git(&dir, &["config", "user.name", "sf-keyaudit tests"]);
+    git(&dir, &["config", "user.email", "tests@example.com"]);
+
+    write(&dir, "secret.py", format!("API_KEY='{key}'\n").as_bytes());
+    git(&dir, &["add", "."]);
+    git(&dir, &["commit", "-m", "add secret"]);
+
+    fs::remove_file(dir.path().join("secret.py")).unwrap();
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-m", "remove secret"]);
+
+    cmd()
+        .arg(dir.path())
+        .assert()
+        .success()
+        .code(0);
+
+    let output = cmd()
+        .arg(dir.path())
+        .arg("--history")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1), "--history must surface deleted secrets from git history");
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert!(
+        report["summary"]["total_findings"].as_u64().unwrap_or(0) >= 1,
+        "history scan must report at least one finding"
+    );
+    let files_scanned = report["files_scanned"].as_u64().unwrap_or(0);
+    assert!(files_scanned >= 1, "history scan must inspect at least one blob");
 }

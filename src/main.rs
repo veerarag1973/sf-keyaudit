@@ -95,7 +95,18 @@ fn run_install_hooks(
         ),
         (
             "pre-push",
-            "#!/bin/sh\n# sf-keyaudit pre-push hook\nset -e\nsf-keyaudit --since-commit origin/HEAD\n",
+            concat!(
+                "#!/bin/sh\n",
+                "# sf-keyaudit pre-push hook\n",
+                "set -e\n",
+                "# Discover the upstream tracking branch; fall back to scanning everything.\n",
+                "UPSTREAM=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null) || UPSTREAM=\"\"\n",
+                "if [ -n \"$UPSTREAM\" ]; then\n",
+                "    sf-keyaudit --since-commit \"$UPSTREAM\"\n",
+                "else\n",
+                "    sf-keyaudit .\n",
+                "fi\n"
+            ),
         ),
     ];
 

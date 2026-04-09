@@ -6,7 +6,7 @@
 //! survives line-number shifts caused by inserting or removing unrelated code
 //! above the secret.
 //!
-//! Output format: `fp-XXXXXXXXXXXX` (15 chars total — "fp-" prefix + 12 hex).
+//! Output format: `fp-XXXXXXXXXXXXXXXX` (19 chars total — "fp-" prefix + 16 hex).
 
 use sha2::{Digest, Sha256};
 

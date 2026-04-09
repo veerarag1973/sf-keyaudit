@@ -99,7 +99,7 @@ sf-keyaudit --baseline .sfkeyaudit-baseline.json --since-commit origin/main .
 Over time, files move or get deleted. Stale baseline entries (fingerprints that no longer match any current finding) accumulate. Prune them periodically:
 
 ```sh
-sf-keyaudit --prune-baseline .sfkeyaudit-baseline.json .
+sf-keyaudit --generate-baseline .sfkeyaudit-baseline.json --prune-baseline .
 ```
 
 This performs a full scan and removes any baseline entry whose fingerprint is not present in the current findings. The pruned file is written back atomically.
@@ -168,7 +168,7 @@ sf-keyaudit \
 ### Weekly prune + auto-commit
 
 ```sh
-sf-keyaudit --prune-baseline .sfkeyaudit-baseline.json .
+sf-keyaudit --generate-baseline .sfkeyaudit-baseline.json --prune-baseline .
 if ! git diff --quiet .sfkeyaudit-baseline.json; then
   git add .sfkeyaudit-baseline.json
   git commit -m "chore: prune stale baseline entries [skip ci]"

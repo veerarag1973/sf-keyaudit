@@ -30,6 +30,12 @@ Exit 0 when clean. Exit 1 when findings are detected. Designed to drop straight 
 | ElevenLabs | `elevenlabs-api-key-v1` |
 | Pinecone | `pinecone-api-key-v1` |
 | Weaviate | `weaviate-api-key-v1` |
+| Stripe | `stripe-live-secret-key-v1`, `stripe-restricted-key-v1` |
+| Slack | `slack-bot-token-v1`, `slack-user-token-v1` |
+| GitHub | `github-fine-grained-pat-v1`, `github-classic-pat-v1`, `github-oauth-token-v1` |
+| GitLab | `gitlab-pat-v1` |
+| SendGrid | `sendgrid-api-key-v1` |
+| Twilio | `twilio-account-sid-v1`, `twilio-auth-token-v1` |
 
 ---
 
@@ -138,6 +144,12 @@ sf-keyaudit [OPTIONS] [PATH]
 | `--scan-archives` | | Scan inside zip, tar, tgz, bz2, and xz archives. |
 | `--cache-file <FILE>` | | Load/save a hash-based scan cache to skip unchanged files. |
 | `--group-by <FIELD>` | | Group `--format text` output by `file`, `provider`, or `severity`. |
+
+**Subcommands**
+
+| Subcommand | Description |
+|---|---|
+| `install-hooks [--path <DIR>] [--force]` | Write `pre-commit` and `pre-push` git hooks into `<DIR>/.git/hooks/` (defaults to `.`). Skips existing hooks unless `--force` is passed. |
 
 See the full [CLI Reference](docs/cli-reference.md) for detailed documentation of every flag.
 

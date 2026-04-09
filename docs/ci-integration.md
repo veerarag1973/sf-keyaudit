@@ -179,7 +179,7 @@ Use a baseline to suppress pre-existing findings so new additions are immediatel
 ```yaml
       - name: Prune baseline
         run: |
-          sf-keyaudit --prune-baseline .sfkeyaudit-baseline.json .
+          sf-keyaudit --generate-baseline .sfkeyaudit-baseline.json --prune-baseline .
           if git diff --quiet .sfkeyaudit-baseline.json; then
             echo "Baseline unchanged"
           else
@@ -370,4 +370,4 @@ cargo build --release
 | PR check — fast full scan | `sf-keyaudit --fail-fast --quiet .` | Block merge |
 | Nightly full scan | `sf-keyaudit --format sarif --output results.sarif --cache-file .sf-cache.json .` | Open ticket |
 | Post-merge gate | `sf-keyaudit --allowlist .sfkeyaudit-allow.yaml --quiet .` | Alert on-call |
-| Baseline prune (weekly) | `sf-keyaudit --prune-baseline .sfkeyaudit-baseline.json .` | Commit updated baseline |
+| Baseline prune (weekly) | `sf-keyaudit --generate-baseline .sfkeyaudit-baseline.json --prune-baseline .` | Commit updated baseline |

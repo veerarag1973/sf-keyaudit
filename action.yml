@@ -52,6 +52,9 @@ outputs:
 runs:
   using: 'composite'
   steps:
+    - name: Ensure Rust toolchain is available
+      uses: dtolnay/rust-toolchain@stable
+
     - name: Install sf-keyaudit
       shell: bash
       run: |
@@ -89,8 +92,44 @@ runs:
         # Append any extra user-supplied arguments.
         ARGS="$ARGS ${{ inputs.args }}"
 
-        sf-keyaudit $ARGS
-        echo "findings-count=$(sf-keyaudit $ARGS --quiet 2>/dev/null; echo $?)" >> "$GITHUB_OUTPUT"
+        # Run the main scan with the user's requested format.
+        if sf-keyaudit $ARGS; then
+          SCAN_EXIT=0
+        else
+          SCAN_EXIT=$?
+        fi
+
+        # Capture the finding count via a JSON sidecar (file-system page cache
+        # makes the second pass significantly faster than the first).
+        BASE_ARGS="${{ inputs.path }}"
+        if [ -n "${{ inputs.since-commit }}" ]; then
+          BASE_ARGS="$BASE_ARGS --since-commit ${{ inputs.since-commit }}"
+        fi
+        if [ "${{ inputs.staged }}" = "true" ]; then
+          BASE_ARGS="$BASE_ARGS --staged"
+        fi
+        if [ -n "${{ inputs.baseline }}" ]; then
+          BASE_ARGS="$BASE_ARGS --baseline ${{ inputs.baseline }}"
+        fi
+        if [ "${{ inputs.verify }}" = "true" ]; then
+          BASE_ARGS="$BASE_ARGS --verify"
+        fi
+        if [ -n "${{ inputs.providers }}" ]; then
+          BASE_ARGS="$BASE_ARGS --providers ${{ inputs.providers }}"
+        fi
+        BASE_ARGS="$BASE_ARGS ${{ inputs.args }}"
+        sf-keyaudit $BASE_ARGS --format json --output /tmp/_sf_keyaudit_count.json --quiet 2>/dev/null || true
+        COUNT=$(python3 - <<'EOF'
+import json, sys
+try:
+    d = json.load(open('/tmp/_sf_keyaudit_count.json'))
+    print(d.get('summary', {}).get('total_findings', 0))
+except Exception:
+    print(0)
+EOF
+        )
+        echo "findings-count=${COUNT:-0}" >> "$GITHUB_OUTPUT"
+        exit $SCAN_EXIT
 
     - name: Upload SARIF to GitHub Code Scanning
       if: inputs.format == 'sarif' && always()
