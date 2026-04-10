@@ -31,6 +31,7 @@ pub fn render(
 }
 
 #[cfg(test)]
+#[allow(clippy::cloned_ref_to_slice_refs)]
 mod tests {
     use super::*;
     use crate::types::{Finding, Report, Summary};
@@ -54,6 +55,7 @@ mod tests {
                 files_with_findings: 0,
             },
             metrics: crate::types::ScanMetrics::default(),
+            policy_violations: vec![],
         }
     }
 
@@ -75,6 +77,7 @@ mod tests {
             low_confidence_findings: vec![],
             baselined_findings: vec![],
             metrics: crate::types::ScanMetrics::default(),
+            policy_violations: vec![],
         }
     }
 

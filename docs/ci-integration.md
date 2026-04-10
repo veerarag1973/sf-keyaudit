@@ -371,3 +371,122 @@ cargo build --release
 | Nightly full scan | `sf-keyaudit --format sarif --output results.sarif --cache-file .sf-cache.json .` | Open ticket |
 | Post-merge gate | `sf-keyaudit --allowlist .sfkeyaudit-allow.yaml --quiet .` | Alert on-call |
 | Baseline prune (weekly) | `sf-keyaudit --generate-baseline .sfkeyaudit-baseline.json --prune-baseline .` | Commit updated baseline |
+| Policy-enforced CI gate | `sf-keyaudit --policy-pack strict-ci --audit-log audit.jsonl --actor ci .` | Block merge |
+
+---
+
+## Policy enforcement in CI
+
+Use `--policy-pack` to enforce a named policy bundle. The build fails (exit code 1) for any finding that triggers a `BLOCK` decision under the active policy. Warnings are reported but do not fail the build.
+
+**Built-in policy packs:**
+
+| Pack | Behaviour |
+|---|---|
+| `strict-ci` | Blocks on any finding (critical through low). Maximum enforcement. |
+| `enterprise-default` | Blocks on critical and high. Warns on medium and low. |
+| `developer-friendly` | Warns on most findings; blocks only on critical validated secrets. |
+| `regulated-env` | Blocks on all findings; requires justification for any suppression. |
+
+**Example — strict policy gate:**
+
+```yaml
+      - name: Policy-enforced scan
+        run: |
+          sf-keyaudit \
+            --policy-pack strict-ci \
+            --format json \
+            --output report.json \
+            .
+```
+
+When policy violations exist, they appear in the `policy_violations` array of the JSON report and under a `POLICY:` section in text output.
+
+**Example — enterprise default with SARIF upload:**
+
+```yaml
+      - name: Scan with enterprise policy
+        run: |
+          sf-keyaudit \
+            --policy-pack enterprise-default \
+            --format sarif \
+            --output results.sarif \
+            . || true  # capture exit code below
+
+      - name: Upload SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif
+
+      - name: Fail on block violations
+        run: sf-keyaudit --policy-pack enterprise-default --quiet .
+```
+
+---
+
+## Audit log for compliance
+
+The `--audit-log` flag writes an append-only JSONL file recording every governance event: scans, findings, policy violations, suppressions, baseline generation, and triage state changes.
+
+Use `--actor` to record who or what triggered the scan (e.g. the CI service account or a developer's username), and `--repository` to identify the repo.
+
+```yaml
+      - name: Scan with audit trail
+        run: |
+          sf-keyaudit \
+            --policy-pack enterprise-default \
+            --audit-log /var/log/sf-keyaudit/audit.jsonl \
+            --actor ${{ github.actor }} \
+            --repository ${{ github.repository }} \
+            --format json \
+            --output report.json \
+            .
+```
+
+The audit log is suitable for ingestion into a SIEM or for submission to compliance auditors as evidence for SOC 2, ISO 27001, or FedRAMP programs.
+
+**Store the audit log as a CI artifact:**
+
+```yaml
+      - name: Upload audit log
+        uses: actions/upload-artifact@v4
+        with:
+          name: sf-keyaudit-audit-${{ github.run_id }}
+          path: audit.jsonl
+          retention-days: 90
+```
+
+---
+
+## Triage workflow in CI
+
+When your security team has reviewed findings and recorded triage decisions, apply the triage store at scan time so already-triaged findings do not re-trigger the build.
+
+**Step 1 — security team triages a finding on their workstation:**
+
+```sh
+sf-keyaudit triage set fp-a1b2c3d4 false_positive \
+  --store .sfkeyaudit-triage.json \
+  --justification "Test fixture, not a real key"
+```
+
+**Step 2 — commit the triage store to the repository:**
+
+```sh
+git add .sfkeyaudit-triage.json
+git commit -m "chore: triage fp-a1b2c3d4 as false_positive"
+```
+
+**Step 3 — CI applies triage decisions automatically:**
+
+```yaml
+      - name: Scan with triage store
+        run: |
+          sf-keyaudit \
+            --triage-store .sfkeyaudit-triage.json \
+            --policy-pack enterprise-default \
+            --quiet \
+            .
+```
+
+Triaged findings remain in the JSON report with their `triage_state` and `triage_justification` populated. They do not count toward policy violations or exit-code failures.

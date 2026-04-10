@@ -156,30 +156,19 @@ impl Baseline {
         self.fingerprints.is_empty()
     }
 
-    pub fn apply<'a>(&self, findings: &'a [Finding]) -> (Vec<&'a Finding>, Vec<&'a Finding>) {
-        let mut new_findings = Vec::new();
-        let mut baselined = Vec::new();
-        for f in findings {
-            if self.contains(f) {
-                baselined.push(f);
-            } else {
-                new_findings.push(f);
-            }
-        }
-        (new_findings, baselined)
-    }
-
     pub fn apply_enriched(&self, findings: &[Finding]) -> (Vec<Finding>, Vec<Finding>) {
         let mut new_findings: Vec<Finding> = Vec::new();
         let mut baselined: Vec<Finding> = Vec::new();
         for f in findings {
-            if let Some(entry) = self.fingerprints.get(&f.fingerprint) {
-                let mut suppressed = f.clone();
-                suppressed.first_seen = Some(entry.first_seen.clone());
-                suppressed.last_seen = Some(entry.last_seen.clone());
-                suppressed.suppression_provenance =
-                    Some(format!("baseline:{}", entry.fingerprint));
-                baselined.push(suppressed);
+            if self.contains(f) {
+                if let Some(entry) = self.fingerprints.get(&f.fingerprint) {
+                    let mut suppressed = f.clone();
+                    suppressed.first_seen = Some(entry.first_seen.clone());
+                    suppressed.last_seen = Some(entry.last_seen.clone());
+                    suppressed.suppression_provenance =
+                        Some(format!("baseline:{}", entry.fingerprint));
+                    baselined.push(suppressed);
+                }
             } else {
                 new_findings.push(f.clone());
             }
@@ -237,6 +226,7 @@ impl Baseline {
 }
 
 #[cfg(test)]
+#[allow(clippy::cloned_ref_to_slice_refs)]
 mod tests {
     use super::*;
     use crate::types::Finding;
@@ -294,7 +284,7 @@ mod tests {
         let f3 = make_finding("groq-api-key-v1", "src/c.py", 3);
         let bl = Baseline::generate(&[f1.clone()], "2.1.0");
         let all = vec![f1, f2.clone(), f3.clone()];
-        let (new, baselined) = bl.apply(&all);
+        let (new, baselined) = bl.apply_enriched(&all);
         assert_eq!(new.len(), 2);
         assert_eq!(baselined.len(), 1);
     }

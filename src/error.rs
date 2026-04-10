@@ -48,6 +48,10 @@ pub enum AuditError {
         path: String,
         source: std::io::Error,
     },
+
+    /// Audit log could not be written or opened.
+    #[error("Audit log error: {0}")]
+    AuditLog(String),
 }
 
 /// Internal exit code values — stable across versions.

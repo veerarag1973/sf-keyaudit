@@ -287,6 +287,7 @@ fn path_contains_excluded_dir(path: &Path, excluded: &[&str]) -> bool {
 /// - Valid UTF-8: `(Some(text), None)`.
 /// - Invalid UTF-8: `(Some(lossy_text), Some(warning))`.
 /// - I/O error: `(None, Some(error_message))`.
+#[allow(dead_code)]
 pub fn read_file_content_lossy(path: &Path) -> (Option<String>, Option<String>) {
     let bytes = match std::fs::read(path) {
         Ok(b) => b,

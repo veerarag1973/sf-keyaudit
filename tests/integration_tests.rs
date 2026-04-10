@@ -592,7 +592,6 @@ fn ignore_file_with_nonexistent_path_scan_still_proceeds() {
 /// On Windows, directory symlinks require Developer Mode or admin privileges.
 /// These tests attempt to create one and gracefully skip if the privilege is
 /// not available in the test environment.
-
 #[cfg(windows)]
 #[test]
 fn without_follow_links_windows_symlinked_dir_not_traversed() {

@@ -29,6 +29,7 @@ Output goes to **stdout** by default. Use `--output <FILE>` to write to a file i
 | `baselined_findings` | array of Finding | Findings suppressed by `--baseline`. Do not trigger exit 1. |
 | `summary` | Summary object | Aggregated counts. |
 | `metrics` | ScanMetrics object | Scan performance and coverage counters. |
+| `policy_violations` | array of PolicyViolation | Policy rules that were triggered by this scan. Absent when empty (no policy pack active or no violations). |
 
 ### Finding object
 
@@ -51,6 +52,20 @@ Output goes to **stdout** by default. Use `--output <FILE>` to write to a file i
 | `owner` | string or null | CODEOWNERS match for this file path. Set only when `--owners` is used. |
 | `last_author` | string or null | Git blame author for this line. Set only when `--owners` is used. |
 | `suppression_provenance` | string or null | How this finding was suppressed, e.g. `"baseline:fp-abc123"`. |
+| `confidence` | string or null | Detector quality tier: `"high"`, `"medium"`, or `"low"`. |
+| `triage_state` | string or null | Current triage state, e.g. `"false_positive"`, `"accepted_risk"`, `"fixed"`. Absent when not set. |
+| `triage_justification` | string or null | Free-text justification recorded when the triage state was set. Absent when not set. |
+
+### PolicyViolation object
+
+Present in `policy_violations` when `--policy-pack` is used and at least one rule fires.
+
+| Field | Type | Description |
+|---|---|---|
+| `fingerprint` | string | `fp-`-prefixed fingerprint of the finding that triggered this violation. |
+| `rule` | string | Policy rule identifier, e.g. `"block-critical"`, `"warn-high"`. |
+| `decision` | string | `"BLOCK"`, `"WARN"`, or `"ALLOW"`. |
+| `justification` | string | Human-readable explanation of why the rule fired. |
 
 ### Summary object
 
@@ -81,7 +96,7 @@ Output goes to **stdout** by default. Use `--output <FILE>` to write to a file i
 {
   "scan_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
   "tool": "sf-keyaudit",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "timestamp": "2026-06-01T10:15:42Z",
   "scan_root": "/home/user/my-project",
   "files_scanned": 247,
@@ -103,7 +118,10 @@ Output goes to **stdout** by default. Use `--output <FILE>` to write to a file i
       "last_author": "alice@example.com",
       "first_seen": null,
       "last_seen": null,
-      "suppression_provenance": null
+      "suppression_provenance": null,
+      "confidence": "high",
+      "triage_state": null,
+      "triage_justification": null
     },
     {
       "id": "f-002",
@@ -122,7 +140,10 @@ Output goes to **stdout** by default. Use `--output <FILE>` to write to a file i
       "last_author": "bob@example.com",
       "first_seen": null,
       "last_seen": null,
-      "suppression_provenance": null
+      "suppression_provenance": null,
+      "confidence": "high",
+      "triage_state": null,
+      "triage_justification": null
     }
   ],
   "low_confidence_findings": [
@@ -143,7 +164,10 @@ Output goes to **stdout** by default. Use `--output <FILE>` to write to a file i
       "last_author": null,
       "first_seen": null,
       "last_seen": null,
-      "suppression_provenance": null
+      "suppression_provenance": null,
+      "confidence": "low",
+      "triage_state": null,
+      "triage_justification": null
     }
   ],
   "baselined_findings": [],
@@ -177,6 +201,9 @@ Notes on the example:
 - `validation_status`, `owner`, and `last_author` are `null` unless `--verify` and `--owners` are passed, respectively.
 - `first_seen` and `last_seen` are populated from the baseline file when `--baseline` is used.
 - `metrics.cached_files_skipped` is non-zero only when `--cache-file` is provided and the cache already contains hashes from a prior run.
+- `confidence` reflects the quality tier of the pattern that matched. It is always present.
+- `triage_state` and `triage_justification` are populated only when a triage store is active (`--triage-store`) and the finding has been triaged.
+- `policy_violations` is omitted from the JSON when empty. It appears only when `--policy-pack` is used and at least one rule fires.
 
 ---
 
@@ -209,7 +236,9 @@ sf-keyaudit --format sarif --output results.sarif .
       "properties": {
         "scanRoot": "/home/user/my-project",
         "filesScanned": 247,
-        "scanId": "3fa85f64-..."
+        "scanId": "3fa85f64-...",
+        "policyBlockCount": 0,
+        "policyWarnCount": 0
       }
     }
   ]
@@ -266,16 +295,18 @@ Rules are deduplicated — each `pattern_id` appears at most once regardless of 
     "patternId": "openai-project-key-v2",
     "entropy": 4.87,
     "fingerprint": "fp-a1b2c3d4...",
+    "confidence": "high",
     "validationStatus": "likely-valid",
     "owner": "@platform-team",
     "lastAuthor": "alice@example.com",
     "firstSeen": null,
-    "lastSeen": null
+    "lastSeen": null,
+    "triageState": null
   }
 }
 ```
 
-The `properties` fields added in v2.0 (`fingerprint`, `validationStatus`, `owner`, `lastAuthor`, `firstSeen`, `lastSeen`) are always present in the result object. `validationStatus`, `owner`, and `lastAuthor` are `null` unless `--verify` and `--owners` are used, respectively.
+The `properties` fields added in v2.1 (`fingerprint`, `validationStatus`, `owner`, `lastAuthor`, `firstSeen`, `lastSeen`, `confidence`, `triageState`) are always present in the result object. `validationStatus`, `owner`, and `lastAuthor` are `null` unless `--verify` and `--owners` are used, respectively. `triageState` is `null` unless a triage store is active.
 
 Only high-confidence findings appear in SARIF `results`. Low-confidence and baselined findings are omitted from SARIF output.
 

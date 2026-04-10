@@ -5,7 +5,7 @@
 //! and applying the allowlist.
 
 use crate::entropy::shannon_entropy;
-use crate::patterns::Pattern;
+use crate::patterns::{ConfidenceTier, Pattern};
 
 /// Default maximum file size in bytes (10 MiB).
 pub const DEFAULT_MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
@@ -32,6 +32,8 @@ pub struct RawFinding {
     /// The raw, unredacted credential body — used only for network validation
     /// during this scan run; never written to any Finding output field.
     pub secret_body: String,
+    /// Detection confidence tier inherited from the matched pattern.
+    pub confidence: Option<ConfidenceTier>,
 }
 
 /// Scan the raw bytes / text of a single file against the provided patterns.
@@ -97,6 +99,7 @@ pub fn scan_content(
                 remediation: pattern.remediation.clone(),
                 fingerprint,
                 secret_body: body.to_string(),
+                confidence: Some(pattern.confidence),
             });
         }
     }
@@ -564,6 +567,7 @@ mod tests {
             remediation: String::new(),
             fingerprint: "fp-aabbccddeeff".into(),
             secret_body: "sk-realkey000".into(),
+            confidence: None,
         };
         let f2 = RawFinding {
             provider: "stability-ai".into(),
@@ -578,6 +582,7 @@ mod tests {
             remediation: String::new(),
             fingerprint: "fp-112233445566".into(),
             secret_body: "realkey000".into(),
+            confidence: None,
         };
         let result = dedup_by_position(vec![f1, f2]);
         assert_eq!(result.len(), 1);
@@ -600,6 +605,7 @@ mod tests {
             remediation: String::new(),
             fingerprint: "fp-aabbccddeeff".into(),
             secret_body: "sk-realkey000".into(),
+            confidence: None,
         };
         let result = dedup_by_position(vec![make(1, 5), make(2, 5), make(1, 20)]);
         assert_eq!(result.len(), 3);

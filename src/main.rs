@@ -1,4 +1,9 @@
+// AuditError is an intentionally unified error type used across the whole
+// codebase; boxing individual variants would reduce ergonomics without benefit.
+#![allow(clippy::result_large_err)]
+
 mod allowlist;
+mod audit;
 mod baseline;
 mod cache;
 mod cli;
@@ -10,28 +15,33 @@ mod git;
 mod output;
 mod ownership;
 mod patterns;
+mod policy;
 mod scanner;
 mod telemetry;
+mod triage;
 mod types;
 mod verify;
 mod walker;
 
 use allowlist::{today_utc, Allowlist, AllowlistWarning};
+use audit::{AuditEventKind, AuditLog};
 use baseline::Baseline;
 use cache::ScanCache;
 use chrono::Utc;
 use clap::{CommandFactory, FromArgMatches};
-use cli::{Cli, GroupByArg, SfSubcommand};
-use config::ProjectConfig;
+use cli::{Cli, GroupByArg, SfSubcommand, TriageCommand};
+use config::{PolicyConfig, ProjectConfig};
 use error::{AuditError, ExitCode};
 use ownership::CodeownersMap;
 use patterns::{build_custom_patterns, build_patterns, filter_by_providers};
+use policy::evaluate as evaluate_policy;
+use crate::types::PolicyDecision;
 use rayon::prelude::*;
 use scanner::{scan_archive_tar, scan_archive_zip, scan_content, scan_notebook_json, RawFinding};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 use types::{Finding, OutputFormat, Report, ScanMetrics, Summary};
 use uuid::Uuid;
 use walker::{walk, walk_single_file, WalkConfig, WalkEntry};
@@ -70,6 +80,9 @@ fn run() -> i32 {
     let cli = parse_cli();
     if let Some(SfSubcommand::InstallHooks { path, force }) = &cli.command {
         return dispatch_result(run_install_hooks(path.as_deref(), *force));
+    }
+    if let Some(SfSubcommand::Triage { command }) = &cli.command {
+        return dispatch_result(run_triage_command(command, &cli));
     }
     dispatch_result(run_inner(&cli))
 }
@@ -135,6 +148,109 @@ fn run_install_hooks(
         eprintln!("info: installed {} hook at {}", name, hook_path.display());
     }
     Ok(ExitCode::Clean)
+}
+
+/// Execute a `triage` subcommand (`set` or `list`).
+fn run_triage_command(cmd: &TriageCommand, cli: &Cli) -> Result<ExitCode, AuditError> {
+    // Resolve actor / audit-log the same way run_inner does.
+    let actor: String = cli
+        .actor
+        .clone()
+        .or_else(|| std::env::var("SFKEYAUDIT_ACTOR").ok())
+        .or_else(|| {
+            std::env::var("USERNAME")
+                .ok()
+                .or_else(|| std::env::var("USER").ok())
+        })
+        .unwrap_or_else(|| "unknown".into());
+
+    let repository: String = cli
+        .repository
+        .clone()
+        .or_else(|| std::env::var("SFKEYAUDIT_REPOSITORY").ok())
+        .unwrap_or_default();
+
+    let scan_id = Uuid::new_v4().to_string();
+    let audit_log: AuditLog = match &cli.audit_log {
+        Some(path) => AuditLog::open(path, &actor, &repository, &scan_id)
+            .map_err(|e| AuditError::Config(format!("cannot initialise audit log: {e}")))?,
+        None => AuditLog::disabled(),
+    };
+
+    let default_store = std::path::PathBuf::from(".sfkeyaudit-triage.json");
+
+    match cmd {
+        TriageCommand::Set { fingerprint, state, justification, store } => {
+            let store_path = store.as_deref().unwrap_or(&default_store);
+
+            // Parse requested state.
+            let new_state: types::TriageState = state.parse().map_err(AuditError::Config)?;
+
+            let mut ts = triage::TriageStore::load_or_create(store_path)?;
+            let old_state = ts
+                .get(fingerprint)
+                .map(|e| e.state.as_str().to_string())
+                .unwrap_or_else(|| "open".to_string());
+
+            let entry = triage::TriageEntry {
+                state: new_state,
+                justification: justification.clone(),
+                actor: actor.clone(),
+                updated_at: Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            };
+            ts.set(fingerprint.clone(), entry);
+            ts.save(store_path)?;
+
+            audit_log.record(AuditEventKind::TriageStateChanged {
+                fingerprint: fingerprint.clone(),
+                old_state,
+                new_state: new_state.as_str().to_string(),
+                justification: justification.clone(),
+            });
+
+            if !cli.quiet {
+                eprintln!(
+                    "info: triage state for {} set to '{}' (store: {})",
+                    fingerprint,
+                    new_state,
+                    store_path.display()
+                );
+            }
+            Ok(ExitCode::Clean)
+        }
+
+        TriageCommand::List { store } => {
+            let store_path = store.as_deref().unwrap_or(&default_store);
+            let ts = triage::TriageStore::load_or_create(store_path)?;
+
+            if ts.fingerprints.is_empty() {
+                if !cli.quiet {
+                    println!("No triage entries in store '{}'.", store_path.display());
+                }
+                return Ok(ExitCode::Clean);
+            }
+
+            let mut entries: Vec<(&String, &triage::TriageEntry)> =
+                ts.fingerprints.iter().collect();
+            entries.sort_by_key(|(fp, _)| fp.as_str());
+
+            println!("{:<22}  {:<25}  {:<12}  {}", "FINGERPRINT", "STATE", "ACTOR", "UPDATED_AT");
+            println!("{}", "-".repeat(80));
+            for (fp, e) in entries {
+                println!(
+                    "{:<22}  {:<25}  {:<12}  {}",
+                    fp,
+                    e.state.as_str(),
+                    e.actor,
+                    e.updated_at
+                );
+                if let Some(ref j) = e.justification {
+                    println!("                         justification: {j}");
+                }
+            }
+            Ok(ExitCode::Clean)
+        }
+    }
 }
 
 /// Build the Clap command with the Spanforge branded header injected into the
@@ -267,6 +383,24 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
         }
     }
 
+    // Load plugin rules from --plugin-dir CLI flags and config plugin_dirs.
+    {
+        let mut plugin_dirs = cli.plugin_dir.clone();
+        if let Some(ref cfg) = project_config {
+            plugin_dirs.extend(cfg.plugin_dirs.iter().cloned());
+        }
+        if !plugin_dirs.is_empty() {
+            let plugin_rules = config::load_plugin_rules(&plugin_dirs)?;
+            if !plugin_rules.is_empty() {
+                let plugin_patterns = build_custom_patterns(&plugin_rules)?;
+                info!(count = plugin_patterns.len(), "loaded plugin rules");
+                let mut merged = plugin_patterns;
+                merged.extend(all_patterns);
+                all_patterns = merged;
+            }
+        }
+    }
+
     // ── Apply severity overrides from project config ──────────────────────────
     if let Some(ref cfg) = project_config {
         if !cfg.severity_overrides.is_empty() {
@@ -316,7 +450,11 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
                 al_path.display()
             )));
         }
-        Allowlist::load(al_path)?
+        let al = Allowlist::load(al_path)?;
+        if cli.verbose && !al.is_empty() {
+            eprintln!("info: allowlist loaded from {}", al_path.display());
+        }
+        al
     } else {
         Allowlist::empty()
     };
@@ -334,7 +472,14 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
             )));
         }
         let bl = Baseline::load(bl_path)?;
-        info!(path = %bl_path.display(), fingerprints = bl.fingerprints.len(), "loaded baseline");
+        if cli.verbose {
+            if bl.is_empty() {
+                eprintln!("info: baseline loaded (empty — no suppressed fingerprints)");
+            } else {
+                eprintln!("info: baseline loaded ({} suppressed fingerprints)", bl.len());
+            }
+        }
+        info!(path = %bl_path.display(), fingerprints = bl.len(), "loaded baseline");
         Some(bl)
     } else {
         None
@@ -348,6 +493,54 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
     let effective_output: Option<std::path::PathBuf> = cli.output.clone().or_else(|| {
         project_config.as_ref().and_then(|c| c.output_file.clone())
     });
+
+    // ── Resolve actor / repository for audit log ──────────────────────────────
+    let actor: String = cli
+        .actor
+        .clone()
+        .or_else(|| std::env::var("SFKEYAUDIT_ACTOR").ok())
+        .or_else(|| {
+            std::env::var("USERNAME")
+                .ok()
+                .or_else(|| std::env::var("USER").ok())
+        })
+        .unwrap_or_else(|| "unknown".into());
+
+    let repository: String = cli
+        .repository
+        .clone()
+        .or_else(|| std::env::var("SFKEYAUDIT_REPOSITORY").ok())
+        .unwrap_or_default();
+
+    // ── Set up audit log (if --audit-log supplied) ───────────────────────────
+    let scan_id = Uuid::new_v4().to_string();
+    let audit_log: AuditLog = match &cli.audit_log {
+        Some(path) => AuditLog::open(path, &actor, &repository, &scan_id).map_err(|e| {
+            AuditError::Config(format!("cannot initialise audit log: {e}"))
+        })?,
+        None => AuditLog::disabled(),
+    };
+
+    audit_log.record(AuditEventKind::ScanStarted {
+        scan_root: scan_root.display().to_string(),
+        provider_filter: provider_filter.clone(),
+    });
+
+    // ── Resolve policy config ─────────────────────────────────────────────────
+    // CLI `--policy-pack` overrides the config file value.
+    let effective_policy: PolicyConfig = {
+        let mut policy = project_config
+            .as_ref()
+            .and_then(|c| c.policy.clone())
+            .unwrap_or_default();
+        if let Some(ref pack_str) = cli.policy_pack {
+            match pack_str.parse::<config::PolicyPackName>() {
+                Ok(p) => policy.pack = p,
+                Err(e) => return Err(AuditError::Config(e)),
+            }
+        }
+        policy
+    };
 
     // ── Resolve effective max_file_size / max_depth ───────────────────────────
     let max_file_size = project_config
@@ -457,7 +650,10 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
     // ScanCache::load returns Self directly (never fails; returns empty on error).
     let mut scan_cache: Option<ScanCache> = if let Some(ref cache_path) = cli.cache_file {
         let c = ScanCache::load(cache_path);
-        info!(path = %cache_path.display(), "loaded scan cache");
+        if cli.verbose && !c.is_empty() {
+            eprintln!("info: scan cache loaded ({} entries)", c.len());
+        }
+        info!(path = %cache_path.display(), entries = c.len(), "loaded scan cache");
         Some(c)
     } else {
         None
@@ -546,7 +742,7 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
                 && matches!(ext.as_str(), "zip" | "tar" | "gz" | "tgz" | "bz2" | "xz")
             {
                 archives_scanned.fetch_add(1, Ordering::Relaxed);
-                let mut results = if ext == "zip" {
+                let results = if ext == "zip" {
                     scan_archive_zip(&entry.path, &scan_root, &active_patterns)
                 } else {
                     scan_archive_tar(&entry.path, &scan_root, &active_patterns)
@@ -608,15 +804,20 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
                     return vec![];
                 }
                 let content = String::from_utf8_lossy(&blob.content).into_owned();
+                // Prefix the path with the blob SHA so history-mode findings are
+                // clearly distinguished from working-tree findings and have a
+                // stable, unique virtual path even when the same filename appears
+                // at multiple revisions.
+                let virtual_path = format!("git:{}@{}", &blob.blob_sha[..8], blob.filename);
                 let ext = std::path::Path::new(&blob.filename)
                     .extension()
                     .and_then(|e| e.to_str())
                     .unwrap_or("")
                     .to_lowercase();
                 if ext == "ipynb" {
-                    scan_notebook_json(&blob.filename, &content, &active_patterns)
+                    scan_notebook_json(&virtual_path, &content, &active_patterns)
                 } else {
-                    scan_content(&blob.filename, &content, &active_patterns)
+                    scan_content(&virtual_path, &content, &active_patterns)
                 }
             })
             .collect();
@@ -677,6 +878,9 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
             last_author: None,
             suppression_provenance: None,
             secret_body: Some(raw.secret_body.clone()),
+            confidence: raw.confidence,
+            triage_state: None,
+            triage_justification: None,
         };
         seq += 1;
         if raw.high_confidence {
@@ -729,6 +933,15 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
         );
     }
 
+    // Emit audit events for allowlist suppressions.
+    for f in &suppressed {
+        audit_log.record(AuditEventKind::SuppressionCreated {
+            fingerprint: f.fingerprint.clone(),
+            reason: "allowlist".into(),
+            expires_at: None,
+        });
+    }
+
     // ── Offline validation (--verify) ─────────────────────────────────────────
     let active_findings = if cli.verify {
         info!("running offline validation on {} findings", active_findings.len());
@@ -736,12 +949,29 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
         // Network validation is opt-in: set SFKEYAUDIT_NETWORK_VERIFY=1 together
         // with --verify to make live HTTP liveness checks against provider APIs.
         // WARNING: transmits key material — only use in isolated CI environments.
-        if std::env::var("SFKEYAUDIT_NETWORK_VERIFY").as_deref() == Ok("1") {
+        let findings = if std::env::var("SFKEYAUDIT_NETWORK_VERIFY").as_deref() == Ok("1") {
             info!("running network validation on {} findings", findings.len());
-            verify::apply_network_validation(findings)
+            // Load custom validators from config (if any).
+            let custom_validator_defs = project_config
+                .as_ref()
+                .map(|c| c.custom_validators.as_slice())
+                .unwrap_or(&[]);
+            verify::apply_network_validation_with_custom(findings, custom_validator_defs)
         } else {
             findings
+        };
+        // Emit ValidationExecuted audit events for every finding that received
+        // a validation_status annotation during this verification pass.
+        for f in &findings {
+            if let Some(ref status) = f.validation_status {
+                audit_log.record(AuditEventKind::ValidationExecuted {
+                    fingerprint: f.fingerprint.clone(),
+                    provider:    f.provider.clone(),
+                    status:      status.clone(),
+                });
+            }
         }
+        findings
     } else {
         active_findings
     };
@@ -760,6 +990,14 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
                     if let Ok(ref repo_root) = git::repo_root(&scan_root) {
                         if let Some(blame) = ownership::blame_line(repo_root, &f.file, f.line) {
                             f.last_author = Some(blame.author.clone());
+                            trace!(
+                                file = %f.file,
+                                line = f.line,
+                                author = %blame.author,
+                                commit = %blame.commit,
+                                timestamp = ?blame.timestamp,
+                                "git blame enrichment"
+                            );
                         }
                     }
                     f
@@ -805,8 +1043,8 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
             .collect();
         let mut bl = Baseline::generate(&all_findings, env!("CARGO_PKG_VERSION"));
 
-        // Preserve first_seen timestamps and approval metadata from the existing
-        // baseline so that re-generated baselines don't lose historical context.
+        // Merge new findings into the existing baseline and preserve first_seen /
+        // approval metadata for fingerprints that already exist.
         if let Some(ref existing_bl) = loaded_baseline {
             for (fp, old_entry) in &existing_bl.fingerprints {
                 if let Some(new_entry) = bl.fingerprints.get_mut(fp) {
@@ -815,7 +1053,17 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
                     new_entry.approved_at = old_entry.approved_at.clone();
                 }
             }
+            // Pull in any fingerprints from the existing baseline that are not in
+            // the current scan (e.g. findings from other branches) so they are not
+            // silently dropped.
+            let added = bl.merge(&all_findings);
+            if added > 0 {
+                debug!(added, "merged additional findings into regenerated baseline");
+            }
         }
+
+        // Update last_seen timestamps for every fingerprint present in this scan.
+        bl.refresh_timestamps(&all_findings);
 
         // Prune stale entries before writing (--prune-baseline).
         if cli.prune_baseline {
@@ -860,6 +1108,11 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
             fingerprints = bl.fingerprints.len(),
             "baseline written"
         );
+        // Emit BaselineGenerated audit event.
+        audit_log.record(AuditEventKind::BaselineGenerated {
+            path: bl_path.display().to_string(),
+            entry_count: bl.fingerprints.len(),
+        });
     }
 
     // ── Set first_seen / last_seen on new findings ────────────────────────────
@@ -878,6 +1131,18 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
             f
         })
         .collect();
+
+    // ── Apply triage store (--triage-store) ───────────────────────────────────
+    // Load the store and apply previously recorded triage decisions to findings
+    // so they appear in output and influence policy evaluation.
+    let final_findings: Vec<Finding> = if let Some(ref ts_path) = cli.triage_store {
+        let store = triage::TriageStore::load_or_create(ts_path)?;
+        let mut findings = final_findings;
+        store.apply(&mut findings);
+        findings
+    } else {
+        final_findings
+    };
 
     // ── Collect scan metrics ──────────────────────────────────────────────────
     let scan_duration_ms = scan_start.elapsed().as_millis() as u64;
@@ -898,7 +1163,7 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
     root_span
         .record("scan.files_scanned", files_scanned as u64)
         .record("scan.findings", final_findings.len() as u64)
-        .record("scan.duration_ms", scan_duration_ms as u64);
+        .record("scan.duration_ms", scan_duration_ms);
 
     info!(
         files_scanned = files_scanned,
@@ -909,6 +1174,21 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
         duration_ms = scan_duration_ms,
         "scan complete"
     );
+
+    // ── Policy evaluation (BEFORE report construction) ────────────────────────
+    // Evaluate policy up front so that violations are included in every output
+    // format (JSON `policy_violations` array, SARIF run properties, text summary).
+    let policy_violations = evaluate_policy(&final_findings, &effective_policy);
+    let policy_block_count = policy::block_count(&policy_violations);
+    let policy_warn_count  = policy::warn_count(&policy_violations);
+
+    if policy_block_count > 0 || policy_warn_count > 0 {
+        debug!(
+            blocks = policy_block_count,
+            warns  = policy_warn_count,
+            "policy evaluation complete"
+        );
+    }
 
     // ── Build report ──────────────────────────────────────────────────────────
     let summary = Summary::from_findings(&final_findings);
@@ -924,6 +1204,7 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
         baselined_findings,
         summary,
         metrics,
+        policy_violations: policy_violations.clone(),
     };
 
     // ── Output ────────────────────────────────────────────────────────────────
@@ -973,18 +1254,36 @@ fn run_inner(cli: &Cli) -> Result<ExitCode, AuditError> {
                 })?,
                 None => println!("{text}"),
             }
-        } else {
-            match output::render(&report, format, effective_output.as_deref())? {
-                Some(text) => println!("{text}"),
-                None => {} // written to file
-            }
+        } else if let Some(text) = output::render(&report, format, effective_output.as_deref())? {
+            println!("{text}");
         }
     }
 
     // ── Determine exit code ───────────────────────────────────────────────────
     let has_allowlist_issues = !al_warnings.is_empty();
 
-    if !final_findings.is_empty() {
+    // Emit violation events to the audit log (block + warn).
+    for v in &policy_violations {
+        if v.decision == PolicyDecision::Block {
+            audit_log.record(AuditEventKind::PolicyViolation {
+                fingerprint:   v.fingerprint.clone(),
+                rule:          v.rule.clone(),
+                decision:      v.decision.to_string(),
+                justification: v.justification.clone(),
+            });
+        }
+    }
+
+    // Emit scan-completed event.
+    audit_log.record(AuditEventKind::ScanCompleted {
+        scan_id:         scan_id.clone(),
+        total_findings:  final_findings.len(),
+        high_confidence: high_confidence_count,
+        policy_blocks:   policy_block_count,
+        duration_ms:     scan_duration_ms,
+    });
+
+    if !final_findings.is_empty() || policy_block_count > 0 {
         Ok(ExitCode::Findings)
     } else if has_allowlist_issues {
         Ok(ExitCode::AllowlistWarn)
@@ -1031,6 +1330,7 @@ mod tests {
             verbose: false,
             follow_links: false,
             config: None,
+            plugin_dir: vec![],
             threads: None,
             generate_baseline: None,
             baseline: None,
@@ -1045,6 +1345,11 @@ mod tests {
             cache_file: None,
             prune_baseline: false,
             baseline_approved_by: None,
+            policy_pack: None,
+            audit_log: None,
+            actor: None,
+            repository: None,
+            triage_store: None,
             command: None,
         }
     }

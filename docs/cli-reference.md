@@ -244,7 +244,7 @@ Print the version string and exit.
 
 ```sh
 sf-keyaudit -V
-# sf-keyaudit v1.0.0  |  Copyright © 2026 Spanforge  |  Build 42
+# sf-keyaudit v2.2.0  |  Copyright © 2026 Spanforge  |  Build 42
 ```
 
 ---
@@ -306,6 +306,21 @@ sf-keyaudit --config policy/.sfkeyaudit.yaml .
 ```
 
 When omitted, the tool searches for `.sfkeyaudit.yaml` starting at the scan root and walking up to the filesystem root. Settings in the config file can be overridden by CLI flags. See [Configuration](config.md) for the full format.
+
+---
+
+### `--plugin-dir <DIR>`
+
+Directory containing plugin YAML files with custom detection rules.
+
+- **Type**: directory path (repeatable)
+- **Default**: none
+
+```sh
+sf-keyaudit --plugin-dir ./company-rules --plugin-dir ./team-rules .
+```
+
+Every `.yaml` / `.yml` file in the directory is treated as a YAML list of custom rule definitions (same schema as `custom_rules` in `.sfkeyaudit.yaml`). Plugin rules take priority over built-in patterns. Can also be specified via the `plugin_dirs` field in the config file. See [Configuration](config.md) for the rule schema.
 
 ---
 
@@ -514,4 +529,138 @@ Group `--format text` output by a specified field.
 ```sh
 sf-keyaudit --format text --group-by file .
 sf-keyaudit --format text --group-by provider .
-sf-keyaudit --format text --group-by severity .```
+sf-keyaudit --format text --group-by severity .
+```
+
+---
+
+## Policy, audit, and triage flags (v2.1)
+
+### `--policy-pack <PACK>`
+
+Enforce a named policy pack over the scan results.
+
+- **Type**: `strict-ci` | `developer-friendly` | `enterprise-default` | `regulated-env` | `custom`
+- **Default**: value from `.sfkeyaudit.yaml` `policy.pack`, or `developer-friendly`
+
+```sh
+sf-keyaudit --policy-pack strict-ci .
+sf-keyaudit --policy-pack enterprise-default --audit-log audit.jsonl .
+```
+
+Findings that exceed the pack's severity or confidence threshold are collected as
+`policy_violations` in the report and included in JSON, SARIF run properties, and text output.
+Exit code 1 is returned when at least one **block** violation is present.
+
+See [Configuration → policy block](config.md#policy) for the full list of fields.
+
+---
+
+### `--audit-log <FILE>`
+
+Append structured audit events to `FILE` in newline-delimited JSON (`.jsonl`).
+
+- **Type**: file path (created or appended)
+- **Default**: none
+
+```sh
+sf-keyaudit --audit-log audit.jsonl .
+sf-keyaudit --audit-log /var/log/sfkeyaudit.jsonl --actor ci-bot .
+```
+
+Recorded events include `ScanStarted`, `ScanCompleted`, `FindingDetected`,
+`SuppressionCreated`, `ValidationExecuted`, `PolicyViolation`,
+`BaselineGenerated`, and `TriageStateChanged`.
+
+---
+
+### `--actor <IDENTITY>`
+
+Identity written into every audit log event (e.g. a CI service account or
+developer username).
+
+- **Type**: string
+- **Default**: `SFKEYAUDIT_ACTOR` env var, then empty string
+
+```sh
+sf-keyaudit --actor github-actions --audit-log audit.jsonl .
+```
+
+---
+
+### `--repository <REPO>`
+
+Repository identifier recorded in audit log events (e.g. `"org/repo"`).
+
+- **Type**: string
+- **Default**: `SFKEYAUDIT_REPOSITORY` env var, then empty string
+
+```sh
+sf-keyaudit --repository acme/backend --audit-log audit.jsonl .
+```
+
+---
+
+### `--triage-store <FILE>`
+
+Apply previously recorded triage decisions to findings before output is rendered.
+
+- **Type**: file path (`.sfkeyaudit-triage.json`)
+- **Default**: none
+
+```sh
+# At scan time, annotate findings with stored triage state
+sf-keyaudit --triage-store .sfkeyaudit-triage.json .
+
+# Pre-populate the store
+sf-keyaudit triage set fp-abc123def false_positive --justification "test fixture"
+```
+
+The store is a human-readable JSON file.  Entries are keyed by fingerprint and
+contain the triage state, optional justification, actor, and last-updated timestamp.
+Use `sf-keyaudit triage set` to add entries and `sf-keyaudit triage list` to review them.
+
+---
+
+## Subcommands
+
+### `sf-keyaudit install-hooks`
+
+Install pre-commit and pre-push git hooks into `.git/hooks/`.
+
+```sh
+sf-keyaudit install-hooks
+sf-keyaudit install-hooks --path /path/to/repo
+```
+
+---
+
+### `sf-keyaudit triage`
+
+Manage triage states for findings.
+
+#### `sf-keyaudit triage set <FINGERPRINT> <STATE>`
+
+Record or update the triage state for a finding identified by its fingerprint.
+
+```sh
+sf-keyaudit triage set fp-abc123def false_positive
+sf-keyaudit triage set fp-abc123def accepted_risk --justification "risk accepted by security team"
+sf-keyaudit triage set fp-abc123def open --store custom-triage.json
+```
+
+**`<STATE>`** accepts: `open`, `acknowledged`, `false_positive`, `accepted_risk`,
+`revoked_pending_removal`, `fixed`.
+
+Options:
+- `--justification <TEXT>` — human-readable reason
+- `--store <FILE>` — override the default store path
+
+#### `sf-keyaudit triage list`
+
+Display all entries in the triage store as a table.
+
+```sh
+sf-keyaudit triage list
+sf-keyaudit triage list --store custom-triage.json
+```

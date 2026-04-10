@@ -164,7 +164,6 @@ impl Allowlist {
         (suppressed, active, warnings)
     }
 
-    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }

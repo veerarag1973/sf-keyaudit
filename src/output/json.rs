@@ -42,6 +42,7 @@ mod tests {
                 files_with_findings: 1,
             },
             metrics: crate::types::ScanMetrics::default(),
+            policy_violations: vec![],
         }
     }
 
@@ -144,5 +145,32 @@ mod tests {
         assert!(metrics.get("files_skipped").is_some());
         assert!(metrics.get("suppressed_count").is_some());
         assert!(metrics.get("baselined_count").is_some());
+    }
+
+    #[test]
+    fn policy_violations_absent_in_json_when_empty() {
+        // When policy_violations is an empty Vec, the field must be omitted
+        // from the JSON output because of #[serde(skip_serializing_if = "Vec::is_empty")].
+        let report = sample_report(); // policy_violations = vec![]
+        let json = render(&report).unwrap();
+        assert!(!json.contains("policy_violations"),
+            "policy_violations must be absent when empty");
+    }
+
+    #[test]
+    fn policy_violations_present_in_json_when_non_empty() {
+        use crate::types::{PolicyDecision, PolicyViolation};
+        let mut report = sample_report();
+        let fp = report.findings[0].fingerprint.clone();
+        report.policy_violations = vec![PolicyViolation {
+            fingerprint:   fp,
+            rule:          "block-critical".to_string(),
+            decision:      PolicyDecision::Block,
+            justification: "severity=critical exceeds threshold".to_string(),
+        }];
+        let json = render(&report).unwrap();
+        assert!(json.contains("policy_violations"),
+            "policy_violations must be present when non-empty");
+        assert!(json.contains("block-critical"));
     }
 }

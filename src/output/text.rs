@@ -4,7 +4,7 @@
 //! file) and is designed for developer terminals rather than machine parsing.
 
 use crate::error::AuditError;
-use crate::types::{Finding, Report};
+use crate::types::{Finding, PolicyDecision, Report};
 
 // ── Grouping enum ─────────────────────────────────────────────────────────────
 
@@ -25,6 +25,7 @@ pub fn render(report: &Report) -> Result<String, AuditError> {
 
 /// Render a [`Report`] as human-readable text with optional grouping.
 /// Color is off; call [`render_with_options`] directly for color support.
+#[allow(dead_code)]
 pub fn render_with_grouping(
     report: &Report,
     group_by: Option<GroupBy>,
@@ -172,6 +173,30 @@ pub fn render_with_options(
         ));
     }
 
+    // ── policy enforcement summary ────────────────────────────────────────────
+    if !report.policy_violations.is_empty() {
+        let blocks = report
+            .policy_violations
+            .iter()
+            .filter(|v| v.decision == PolicyDecision::Block)
+            .count();
+        let warns = report
+            .policy_violations
+            .iter()
+            .filter(|v| v.decision == PolicyDecision::Warn)
+            .count();
+        lines.push(format!(
+            "POLICY:   {} block(s), {} warning(s)",
+            blocks, warns
+        ));
+        for v in &report.policy_violations {
+            lines.push(format!(
+                "  [{}] {} — {}",
+                v.decision, v.fingerprint, v.justification
+            ));
+        }
+    }
+
     lines.push(sep);
 
     // ── summary ───────────────────────────────────────────────────────────────
@@ -230,17 +255,27 @@ fn render_grouped_by_field(
 
 fn render_finding(f: &Finding, lines: &mut Vec<String>, color: bool) {
     let severity_str = f.severity.to_uppercase();
+
+    // Build confidence badge: [HIGH-CONF] / [MED-CONF] / [LOW-CONF]
+    let confidence_badge: &str = match f.confidence.map(|c| c.as_str()) {
+        Some("high")   => " [HIGH-CONF]",
+        Some("medium") => " [MED-CONF]",
+        Some("low")    => " [LOW-CONF]",
+        _              => "",
+    };
+
     let prefix_line = if color {
         format!(
-            "{}[{}]{} {}  /  {}",
+            "{}[{}]{} {}  /  {}{}",
             severity_color(&f.severity),
             severity_str,
             COLOR_RESET,
             f.provider,
-            f.pattern_id
+            f.pattern_id,
+            confidence_badge
         )
     } else {
-        format!("[{}] {}  /  {}", severity_str, f.provider, f.pattern_id)
+        format!("[{}] {}  /  {}{}", severity_str, f.provider, f.pattern_id, confidence_badge)
     };
     lines.push(prefix_line);
     lines.push(format!("  File:        {}:{}", f.file, f.line));
@@ -249,6 +284,12 @@ fn render_finding(f: &Finding, lines: &mut Vec<String>, color: bool) {
     lines.push(format!("  Fingerprint: {}", f.fingerprint));
     if let Some(ref status) = f.validation_status {
         lines.push(format!("  Validation:  {status}"));
+    }
+    if let Some(ref triage) = f.triage_state {
+        lines.push(format!("  Triage:      {triage}"));
+        if let Some(ref just) = f.triage_justification {
+            lines.push(format!("  Justification: {just}"));
+        }
     }
     if let Some(ref owner) = f.owner {
         lines.push(format!("  Owner:       {owner}"));
@@ -287,6 +328,7 @@ fn wrap(s: &str, width: usize, indent: usize) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::cloned_ref_to_slice_refs)]
 mod tests {
     use super::*;
     use crate::types::{Finding, Report, ScanMetrics, Summary};
@@ -308,6 +350,7 @@ mod tests {
                 files_skipped: 1,
                 ..ScanMetrics::default()
             },
+            policy_violations: vec![],
         }
     }
 
@@ -390,5 +433,82 @@ mod tests {
         let s = "word1 word2 word3 word4 word5 word6 word7 word8 word9 word10";
         let result = wrap(s, 20, 4);
         assert!(result.contains('\n'));
+    }
+
+    // ── Confidence badge ────────────────────────────────────────────────────────
+
+    #[test]
+    fn text_shows_high_conf_badge() {
+        use crate::patterns::ConfidenceTier;
+        let mut report = report_with_finding();
+        report.findings[0].confidence = Some(ConfidenceTier::High);
+        let text = render(&report).unwrap();
+        assert!(text.contains("[HIGH-CONF]"));
+    }
+
+    #[test]
+    fn text_shows_med_conf_badge() {
+        use crate::patterns::ConfidenceTier;
+        let mut report = report_with_finding();
+        report.findings[0].confidence = Some(ConfidenceTier::Medium);
+        let text = render(&report).unwrap();
+        assert!(text.contains("[MED-CONF]"));
+    }
+
+    #[test]
+    fn text_shows_no_conf_badge_when_none() {
+        let report = report_with_finding();
+        // Default Finding::new sets confidence = None.
+        let text = render(&report).unwrap();
+        assert!(!text.contains("HIGH-CONF"));
+        assert!(!text.contains("MED-CONF"));
+    }
+
+    // ── Triage state rendering ──────────────────────────────────────────────────
+
+    #[test]
+    fn text_shows_triage_state() {
+        use crate::types::TriageState;
+        let mut report = report_with_finding();
+        report.findings[0].triage_state = Some(TriageState::FalsePositive);
+        let text = render(&report).unwrap();
+        assert!(text.contains("false_positive"));
+    }
+
+    #[test]
+    fn text_shows_triage_justification() {
+        use crate::types::TriageState;
+        let mut report = report_with_finding();
+        report.findings[0].triage_state = Some(TriageState::AcceptedRisk);
+        report.findings[0].triage_justification = Some("risk accepted by security team".into());
+        let text = render(&report).unwrap();
+        assert!(text.contains("risk accepted by security team"));
+    }
+
+    // ── Policy violations section ────────────────────────────────────────────
+
+    #[test]
+    fn text_shows_policy_block_summary() {
+        use crate::types::{PolicyDecision, PolicyViolation};
+        let mut report = report_with_finding();
+        report.policy_violations = vec![PolicyViolation {
+            fingerprint:   report.findings[0].fingerprint.clone(),
+            rule:          "block-critical".to_string(),
+            decision:      PolicyDecision::Block,
+            justification: "severity=critical exceeds threshold".to_string(),
+        }];
+        let text = render(&report).unwrap();
+        assert!(text.contains("POLICY:"),   "must contain POLICY: header");
+        assert!(text.contains("1 block"),   "must show block count");
+        assert!(text.contains("[BLOCK]"),   "must show decision per violation");
+        assert!(text.contains("block-critical") || text.contains("severity=critical"),
+            "must show rule or justification");
+    }
+
+    #[test]
+    fn text_no_policy_section_when_no_violations() {
+        let report = report_with_finding(); // policy_violations is vec![]
+        let text = render(&report).unwrap();
+        assert!(!text.contains("POLICY:"), "POLICY header must not appear when violations is empty");
     }
 }

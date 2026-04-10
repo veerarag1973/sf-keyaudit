@@ -1,6 +1,6 @@
 # Providers
 
-sf-keyaudit detects credentials for 24 providers. Each provider maps to one or more **pattern IDs**.
+sf-keyaudit detects credentials for over 40 providers. Each provider maps to one or more **pattern IDs**.
 
 Pattern IDs follow the naming convention `{provider}-{keytype}-v{N}`. The version suffix is incremented when a provider changes their key format, so existing allowlist entries remain identifiable after updates.
 

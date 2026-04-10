@@ -8,6 +8,7 @@ on:
 
 permissions:
   contents: read
+  security-events: write  # required for uploading SARIF results
 
 jobs:
   test:
@@ -36,10 +37,55 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Lint
-        run: cargo clippy --locked --all-targets --all-features
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
 
       - name: Run tests
         run: cargo test --locked --color never
 
       - name: Verify release build
         run: cargo build --release --locked
+
+  # ── Secret scan (SARIF PR annotations and GitHub Security tab) ─────────────
+  # Runs on every push to main and every pull request.  Findings appear as
+  # check annotations on the PR diff and are uploaded to the GitHub
+  # Advanced Security / Code Scanning dashboard.
+  secret-scan:
+    name: Secret scan (SARIF)
+    runs-on: ubuntu-latest
+    # Required so the PR check annotation step can write to the Security tab.
+    permissions:
+      contents: read
+      security-events: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history so --history mode works if needed
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build sf-keyaudit
+        run: cargo build --release --locked
+
+      - name: Run secret scan
+        # Use --exit-code 0 so the step doesn't fail if findings exist;
+        # the SARIF upload step surfaces them as annotations and policy violations
+        # are reported separately via --policy-pack if configured.
+        run: |
+          ./target/release/sf-keyaudit \
+            --format sarif \
+            --output results.sarif \
+            --quiet \
+            . || true
+
+      - name: Upload SARIF to GitHub Advanced Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: results.sarif
+          category: sf-keyaudit

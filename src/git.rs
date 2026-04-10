@@ -117,36 +117,6 @@ pub fn since_commit_files(repo_root: &Path, since_ref: &str) -> Result<Vec<PathB
     Ok(paths)
 }
 
-/// Return every file ever touched in git history (all branches).
-///
-/// **Note**: This only returns files that still exist in the working tree.
-/// Use [`history_blobs`] for a complete scan of all historical blob objects.
-pub fn history_files(repo_root: &Path) -> Result<Vec<PathBuf>, AuditError> {
-    let output = Command::new("git")
-        .args(["log", "--all", "--name-only", "--diff-filter=ACMR", "--format="])
-        .current_dir(repo_root)
-        .output()
-        .map_err(|e| AuditError::GitError(format!("git log --all failed: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(AuditError::GitError(format!(
-            "git log --history failed: {stderr}"
-        )));
-    }
-
-    let mut seen = std::collections::HashSet::new();
-    let text = String::from_utf8_lossy(&output.stdout);
-    let paths: Vec<PathBuf> = text
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| repo_root.join(l.trim()))
-        .filter(|p| p.is_file())
-        .filter(|p| seen.insert(p.clone()))
-        .collect();
-    Ok(paths)
-}
-
 // ── History blob extraction ───────────────────────────────────────────────────
 
 /// A historical blob extracted from git object storage.

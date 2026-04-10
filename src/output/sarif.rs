@@ -3,7 +3,7 @@
 //! Reference: <https://docs.oasis-open.org/sarif/sarif/v2.1.0/sarif-v2.1.0.html>
 
 use crate::error::AuditError;
-use crate::types::Report;
+use crate::types::{PolicyDecision, Report};
 use serde_json::{json, Value};
 
 /// Render a [`Report`] as a SARIF 2.1.0 JSON string.
@@ -42,7 +42,9 @@ pub fn render(report: &Report) -> Result<String, AuditError> {
                 "properties": {
                     "scanRoot": report.scan_root,
                     "filesScanned": report.files_scanned,
-                    "scanId": report.scan_id
+                    "scanId": report.scan_id,
+                    "policyBlockCount": report.policy_violations.iter().filter(|v| v.decision == PolicyDecision::Block).count(),
+                    "policyWarnCount": report.policy_violations.iter().filter(|v| v.decision == PolicyDecision::Warn).count()
                 }
             }
         ]
@@ -140,6 +142,15 @@ fn finding_to_sarif_result(
     }
     if let Some(ref last) = f.last_seen {
         properties["lastSeen"] = serde_json::json!(last);
+    }
+    if let Some(conf) = f.confidence {
+        properties["confidence"] = serde_json::json!(conf.as_str());
+    }
+    if let Some(ref triage) = f.triage_state {
+        properties["triageState"] = serde_json::json!(format!("{triage}"));
+    }
+    if let Some(ref just) = f.triage_justification {
+        properties["triageJustification"] = serde_json::json!(just);
     }
 
     json!({
@@ -271,6 +282,7 @@ mod tests {
                 files_with_findings: 1,
             },
             metrics: crate::types::ScanMetrics::default(),
+            policy_violations: vec![],
         }
     }
 
@@ -371,5 +383,60 @@ mod tests {
         let rules = val["runs"][0]["tool"]["driver"]["rules"].as_array().unwrap();
         // Should only have one rule for openai-project-key-v2
         assert_eq!(rules.len(), 1);
+    }
+
+    // ── New SARIF properties ────────────────────────────────────────────────────
+
+    #[test]
+    fn sarif_properties_include_confidence() {
+        use crate::patterns::ConfidenceTier;
+        let mut report = sample_report();
+        report.findings[0].confidence = Some(ConfidenceTier::High);
+        let sarif = render(&report).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+        let props = &val["runs"][0]["results"][0]["properties"];
+        assert_eq!(props["confidence"].as_str().unwrap(), "high");
+    }
+
+    #[test]
+    fn sarif_properties_include_triage_state() {
+        use crate::types::TriageState;
+        let mut report = sample_report();
+        report.findings[0].triage_state = Some(TriageState::FalsePositive);
+        let sarif = render(&report).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+        let props = &val["runs"][0]["results"][0]["properties"];
+        assert_eq!(props["triageState"].as_str().unwrap(), "false_positive");
+    }
+
+    // ── Policy counts in run properties ─────────────────────────────────────────
+
+    #[test]
+    fn sarif_run_properties_include_policy_block_count() {
+        use crate::types::{PolicyDecision, PolicyViolation};
+        let mut report = sample_report();
+        report.policy_violations = vec![PolicyViolation {
+            fingerprint:   report.findings[0].fingerprint.clone(),
+            rule:          "block-critical".to_string(),
+            decision:      PolicyDecision::Block,
+            justification: "severity=critical".to_string(),
+        }];
+        let sarif = render(&report).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+        let props = &val["runs"][0]["properties"];
+        assert_eq!(props["policyBlockCount"].as_u64().unwrap(), 1,
+            "policyBlockCount must be 1");
+        assert_eq!(props["policyWarnCount"].as_u64().unwrap(), 0,
+            "policyWarnCount must be 0");
+    }
+
+    #[test]
+    fn sarif_run_properties_both_zero_when_no_violations() {
+        let report = sample_report(); // policy_violations is empty
+        let sarif = render(&report).unwrap();
+        let val: serde_json::Value = serde_json::from_str(&sarif).unwrap();
+        let props = &val["runs"][0]["properties"];
+        assert_eq!(props["policyBlockCount"].as_u64().unwrap(), 0);
+        assert_eq!(props["policyWarnCount"].as_u64().unwrap(), 0);
     }
 }

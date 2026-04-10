@@ -49,6 +49,8 @@ For example, if `.sfkeyaudit.yaml` sets `max_file_size: 524288` and you pass `--
 | `threads` | integer | `0` (= logical CPUs) | `--threads` | Number of Rayon worker threads. `0` lets Rayon choose (equal to the number of logical CPUs). |
 | `ignore_patterns` | list of strings | `[]` | — | Extra gitignore-style patterns applied on every scan. Patterns are relative to the scan root. |
 | `custom_rules` | list of CustomRuleDef | `[]` | — | User-defined detection rules appended after the built-in patterns. |
+| `plugin_dirs` | list of paths | `[]` | `--plugin-dir` | Directories containing plugin YAML files. Each `.yaml`/`.yml` file is a list of `CustomRuleDef` entries. |
+| `custom_validators` | list of CustomValidatorDef | `[]` | — | Declarative network validators for custom or unsupported providers. |
 | `severity_overrides` | map string → string | `{}` | — | Override the severity of a built-in or custom pattern by its ID. Valid values: `critical`, `high`, `medium`, `low`. |
 
 ---
@@ -110,6 +112,65 @@ severity_overrides:
 ```
 
 Valid severity values: `critical`, `high`, `medium`, `low`.
+
+---
+
+## `plugin_dirs`
+
+Directories to load additional detection rules from. Each `.yaml` / `.yml` file in a plugin directory must contain a YAML list of `CustomRuleDef` entries (same schema as `custom_rules`).
+
+```yaml
+plugin_dirs:
+  - ./company-rules
+  - /opt/sfkeyaudit/shared-plugins
+```
+
+Plugin rules take priority over built-in patterns. Paths are resolved relative to the config file's directory. Can also be specified with the `--plugin-dir` CLI flag.
+
+---
+
+## `custom_validators`
+
+Declarative network validators for providers that don't have a built-in validator, or for internal/proprietary APIs. Used during network verification (`--verify` + `SFKEYAUDIT_NETWORK_VERIFY=1`).
+
+| Field | Type | Required | Default | Description |
+|---|---|---|---|---|
+| `provider` | string | yes | — | Provider slug (must match a detector's `provider` field). |
+| `url` | string | yes | — | HTTP endpoint to probe — must be read-only and safe to call. |
+| `auth_method` | string | no | `"bearer"` | How the credential is sent: `bearer`, `basic_auth`, `header`, `query_param`. |
+| `auth_header` | string | no | — | Header name for `header` method (e.g. `X-Api-Key`), or query param name for `query_param`. |
+| `auth_value_template` | string | no | — | Template for header value. Use `{key}` as placeholder (e.g. `"Token {key}"`). |
+| `username` | string | no | `"api"` | Username for `basic_auth` method. |
+| `http_method` | string | no | `"GET"` | HTTP method: `GET`, `POST`, or `HEAD`. |
+
+```yaml
+custom_validators:
+  - provider: my-internal-api
+    url: "https://api.internal.example.com/v1/whoami"
+    auth_method: bearer
+
+  - provider: legacy-service
+    url: "https://legacy.example.com/auth/check"
+    auth_method: header
+    auth_header: "X-Legacy-Token"
+    auth_value_template: "Token {key}"
+
+  - provider: vendor-api
+    url: "https://vendor.example.com/v1/validate"
+    auth_method: basic_auth
+    username: "api"
+```
+
+**Auth methods:**
+
+| Method | Behavior |
+|---|---|
+| `bearer` | Sends `Authorization: Bearer {key}` |
+| `basic_auth` | Sends HTTP Basic auth with `username:key` |
+| `header` | Sends a custom header (`auth_header`) with the key (or `auth_value_template`) |
+| `query_param` | Appends `?{auth_header}={key}` to the URL |
+
+Custom validators override built-in validators for the same provider slug. A `200` response confirms the credential is active; `401`/`403` confirms it is invalid.
 
 ---
 
@@ -178,7 +239,48 @@ If the config file contains an unknown field, sf-keyaudit exits with code 2 and 
 error: malformed config file .sfkeyaudit.yaml: unknown field `max_files` at line 4
 ```
 
-This `deny_unknown_fields` behaviour is intentional — it catches typos before they silently change scan behaviour.
+This behaviour catches typos before they silently change scan behaviour.
+
+---
+
+## `policy`
+
+The `policy` block configures the enforcement pack used when `--policy-pack` is
+not passed on the command line.
+
+```yaml
+policy:
+  pack: strict-ci
+  confidence_min: high
+  block_on_confirmed_live: true
+  require_owner: false
+  rule_overrides:
+    openai-legacy-key-v1: block
+    huggingface-token-v1: warn
+```
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `pack` | string | `developer-friendly` | Policy pack name. One of `strict-ci`, `developer-friendly`, `enterprise-default`, `regulated-env`, `custom`. |
+| `confidence_min` | string | none | Minimum confidence tier required for a finding to be evaluated by the policy. One of `high`, `medium`, `low`. Findings below this tier are skipped. |
+| `block_on_confirmed_live` | boolean | `false` | If `true`, any finding confirmed as a live credential (via `--verify`) is promoted to a block regardless of pack thresholds. |
+| `require_owner` | boolean | `false` | If `true`, findings without an identified owner (via `--owners`) also trigger a block violation. |
+| `rule_overrides` | map string → string | `{}` | Override the decision for a specific pattern ID. Values: `block`, `warn`, `allow`. |
+
+**Built-in pack severity thresholds:**
+
+| Pack | Block severities |
+|---|---|
+| `strict-ci` | `critical`, `high` |
+| `developer-friendly` | `critical` only |
+| `enterprise-default` | `critical`, `high` |
+| `regulated-env` | `critical`, `high`, `medium` |
+| `custom` | none by default (use `rule_overrides`) |
+
+Policy violations are included in report output:
+- **JSON**: `policy_violations` array (absent when empty)
+- **SARIF**: `runs[0].properties.policyBlockCount` and `policyWarnCount`
+- **Text**: `POLICY: N block(s), N warning(s)` section with per-finding lines
 
 ---
 

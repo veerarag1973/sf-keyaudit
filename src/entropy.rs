@@ -23,15 +23,11 @@ pub fn shannon_entropy(s: &str) -> f64 {
 }
 
 /// Minimum entropy threshold for a finding to be considered high-confidence
-/// and trigger exit code 1.
-#[allow(dead_code)]
+/// and trigger exit code 1.  Individual patterns may set higher thresholds via
+/// their own `min_entropy` field — this constant is only used when no
+/// per-pattern override is available (e.g. for custom rules without an explicit
+/// threshold).
 pub const HIGH_CONFIDENCE_THRESHOLD: f64 = 3.5;
-
-/// A key body whose entropy is at or above this value is treated as a real key.
-#[allow(dead_code)]
-pub fn is_high_confidence(body: &str) -> bool {
-    shannon_entropy(body) >= HIGH_CONFIDENCE_THRESHOLD
-}
 
 #[cfg(test)]
 mod tests {
@@ -74,13 +70,13 @@ mod tests {
     fn low_entropy_placeholder_below_threshold() {
         // "sk-test" repeated — looks like a key but very low entropy
         let body = "testtesttesttesttesttesttesttesttesttest";
-        assert!(!is_high_confidence(body));
+        assert!(shannon_entropy(body) < HIGH_CONFIDENCE_THRESHOLD);
     }
 
     #[test]
     fn real_looking_key_above_threshold() {
         let body = "xK9pQm7vL3nRwT5yJbHfDcGsEaZuViYo4W8MiNq";
-        assert!(is_high_confidence(body));
+        assert!(shannon_entropy(body) >= HIGH_CONFIDENCE_THRESHOLD);
     }
 
     #[test]

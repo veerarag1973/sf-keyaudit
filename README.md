@@ -4,11 +4,34 @@ A fast, CI-friendly command-line tool that scans codebases for exposed AI API ke
 
 Exit 0 when clean. Exit 1 when findings are detected. Designed to drop straight into a pre-push or pre-merge pipeline as a hard gate.
 
+**v2.2.0** adds: 14 new network validators (32 total), a plugin directory system (`--plugin-dir`) for user-supplied detectors, and declarative custom validators in `.sfkeyaudit.yaml`.
+
+**v2.1.0** adds: policy enforcement packs (`--policy-pack`) with per-finding violation records, a fully operational triage store (`sf-keyaudit triage set/list`, `--triage-store`), confidence-tier filtering in policy evaluation (`confidence_min`), and complete audit log wiring (`BaselineGenerated`, `SuppressionCreated`, `ValidationExecuted`, `TriageStateChanged`, `PolicyViolation`).
+
 **v2.0.0** adds: project config files, baselining, incremental git modes, offline verification, CODEOWNERS enrichment, archive and notebook scanning, a hash-based scan cache, text output with grouping, custom rules, and severity overrides.
 
 ---
 
+## Why trust this tool
+
+| Signal | Detail |
+|---|---|
+| Open source | Full source on GitHub — no proprietary components |
+| Signed releases | Every release binary ships with a SHA-256 checksum and SLSA Level 2 provenance attestation via GitHub Actions |
+| SBOM published | CycloneDX and SPDX SBOMs published with every tagged release |
+| Zero-dependency binary | Single statically linked binary; no runtime, no interpreter required |
+| CI enforced | Every commit runs `cargo fmt`, `clippy -D warnings`, full test suite, and `cargo audit` |
+| Test coverage | 418+ unit tests and 53+ integration tests; property-based tests for core algorithms |
+| Security policy | [SECURITY.md](SECURITY.md): coordinated disclosure, response SLA, nightly `cargo audit` |
+| Dependency audit | Automated nightly scan for known vulnerabilities and yanked crates |
+
+---
+
 ## Supported providers
+
+sf-keyaudit v2.2.0 ships **94 built-in detectors** across 40+ provider families with **32 network validators**. See [Detector Capability Matrix](docs/detector-matrix.md) for the full reference with confidence tiers and validation support.
+
+**AI providers (18 detectors)**
 
 | Provider | Pattern IDs |
 |---|---|
@@ -18,8 +41,6 @@ Exit 0 when clean. Exit 1 when findings are detected. Designed to drop straight 
 | Stability AI | `stability-ai-key-v1` |
 | Google Gemini | `google-gemini-key-v1` |
 | Google Vertex AI | `google-vertex-service-account-v1` |
-| AWS Bedrock | `aws-access-key-id-v1` |
-| Azure OpenAI | `azure-openai-subscription-key-v1` |
 | Cohere | `cohere-api-key-v1` |
 | Mistral AI | `mistral-api-key-v1` |
 | Hugging Face | `huggingface-token-v1` |
@@ -30,18 +51,125 @@ Exit 0 when clean. Exit 1 when findings are detected. Designed to drop straight 
 | ElevenLabs | `elevenlabs-api-key-v1` |
 | Pinecone | `pinecone-api-key-v1` |
 | Weaviate | `weaviate-api-key-v1` |
-| Stripe | `stripe-live-secret-key-v1`, `stripe-restricted-key-v1` |
-| Slack | `slack-bot-token-v1`, `slack-user-token-v1` |
-| GitHub | `github-fine-grained-pat-v1`, `github-classic-pat-v1`, `github-oauth-token-v1` |
-| GitLab | `gitlab-pat-v1` |
-| SendGrid | `sendgrid-api-key-v1` |
+
+**Cloud platforms (8 detectors)**
+
+| Provider | Pattern IDs |
+|---|---|
+| AWS | `aws-access-key-id-v1`, `aws-secret-access-key-v1` |
+| Azure | `azure-openai-subscription-key-v1`, `azure-service-principal-secret-v1` |
+| GCP | `gcp-oauth-client-secret-v1` |
+| DigitalOcean | `digitalocean-pat-v1`, `digitalocean-oauth-token-v1` |
+| Linode | `linode-api-token-v1` |
+
+**Infrastructure tools (9 detectors)**
+
+| Provider | Pattern IDs |
+|---|---|
+| HashiCorp Vault | `vault-service-token-v1`, `vault-batch-token-v1`, `vault-root-token-v1` |
+| Cloudflare | `cloudflare-api-token-v1`, `cloudflare-global-api-key-v1` |
+| Datadog | `datadog-api-key-v1`, `datadog-app-key-v1` |
+| Terraform Cloud | `terraform-cloud-token-v1`, `terraform-cloud-env-token-v1` |
+
+**Source control (7 detectors)**
+
+| Provider | Pattern IDs |
+|---|---|
+| GitHub | `github-fine-grained-pat-v1`, `github-classic-pat-v1`, `github-oauth-token-v1`, `github-actions-token-v1`, `github-refresh-token-v1`, `github-app-private-key-v1` |
+| GitLab | `gitlab-pat-v1`, `gitlab-runner-token-v1` |
+| Bitbucket | `bitbucket-app-password-v1` |
+
+**Package registries (3 detectors)**
+
+| Provider | Pattern IDs |
+|---|---|
+| npm | `npm-access-token-v1` |
+| PyPI | `pypi-api-token-v1` |
+| RubyGems | `rubygems-api-key-v1` |
+
+**Communication & messaging (8 detectors)**
+
+| Provider | Pattern IDs |
+|---|---|
+| Slack | `slack-bot-token-v1`, `slack-webhook-url-v1` |
+| Discord | `discord-bot-token-v1` |
+| Telegram | `telegram-bot-token-v1` |
 | Twilio | `twilio-account-sid-v1`, `twilio-auth-token-v1` |
+| SendGrid | `sendgrid-api-key-v1` |
+| Mailgun | `mailgun-api-key-v1` |
+
+**Payment, observability, auth, databases, crypto, CI/CD, SaaS, blockchain (41 detectors)**
+
+| Provider | Pattern IDs |
+|---|---|
+| Stripe | `stripe-secret-key-v1`, `stripe-restricted-key-v1` |
+| Braintree | `paypal-braintree-token-v1` |
+| New Relic | `new-relic-license-key-v1`, `new-relic-user-api-key-v1` |
+| Sentry | `sentry-dsn-v1` |
+| Splunk | `splunk-hec-token-v1` |
+| Auth0 | `auth0-client-secret-v1` |
+| Okta | `okta-api-token-v1` |
+| Firebase | `firebase-server-key-v1` |
+| PostgreSQL | `postgres-connection-url-v1` |
+| MySQL | `mysql-connection-url-v1` |
+| MongoDB | `mongodb-connection-url-v1` |
+| Redis | `redis-connection-url-v1` |
+| MSSQL | `mssql-connection-string-v1` |
+| PKI | `rsa-private-key-v1`, `pgp-private-key-v1`, `ssh-ed25519-private-key-v1` |
+| JWT | `jwt-secret-context-v1` |
+| CircleCI | `circleci-api-token-v1` |
+| Travis CI | `travis-ci-api-token-v1` |
+| Jenkins | `jenkins-api-token-v1` |
+| Azure DevOps | `azure-devops-pat-v1` |
+| Docker Hub | `docker-hub-pat-v1` |
+| Heroku | `heroku-api-key-v1` |
+| Shopify | `shopify-private-app-token-v1`, `shopify-custom-app-token-v1` |
+| PagerDuty | `pagerduty-api-key-v1` |
+| Jira | `jira-api-token-v1` |
+| Ethereum | `ethereum-private-key-v1` |
+| Infura | `infura-api-key-v1` |
 
 ---
 
 ## Installation
 
-### From crates.io
+### Prebuilt binaries (fastest)
+
+Download a signed binary for your platform from the [latest GitHub release](https://github.com/veerarag1973/sf-keyaudit/releases/latest).
+
+| Platform | Archive | Checksum |
+|---|---|---|
+| Linux x86-64 | `sf-keyaudit-linux-x86_64.tar.gz` | `.sha256` alongside |
+| macOS arm64 (Apple Silicon) | `sf-keyaudit-macos-arm64.tar.gz` | `.sha256` alongside |
+| Windows x86-64 | `sf-keyaudit-windows-x86_64.zip` | `.sha256` alongside |
+
+#### Linux / macOS
+
+```sh
+curl -LO https://github.com/veerarag1973/sf-keyaudit/releases/latest/download/sf-keyaudit-linux-x86_64.tar.gz
+tar xzf sf-keyaudit-linux-x86_64.tar.gz
+sudo mv sf-keyaudit /usr/local/bin/
+sf-keyaudit --version
+```
+
+#### Windows (PowerShell)
+
+```powershell
+Invoke-WebRequest -Uri https://github.com/veerarag1973/sf-keyaudit/releases/latest/download/sf-keyaudit-windows-x86_64.zip -OutFile sf-keyaudit.zip
+Expand-Archive sf-keyaudit.zip -DestinationPath $env:LOCALAPPDATA\sf-keyaudit
+# Add $env:LOCALAPPDATA\sf-keyaudit to your PATH
+sf-keyaudit --version
+```
+
+### Via cargo-binstall (no compile)
+
+```sh
+cargo binstall sf-keyaudit
+```
+
+Installs the prebuilt binary directly. Requires [`cargo-binstall`](https://github.com/cargo-bins/cargo-binstall).
+
+### From crates.io (compile from source)
 
 ```sh
 cargo install sf-keyaudit
@@ -55,6 +183,24 @@ cd sf-keyaudit
 cargo build --release
 # binary is at target/release/sf-keyaudit
 ```
+
+### Verify a release download
+
+Every release asset ships with a `.sha256` sidecar and a SLSA provenance attestation.
+
+```sh
+# 1. Verify the checksum
+sha256sum --check sf-keyaudit-linux-x86_64.tar.gz.sha256
+
+# 2. Verify SLSA provenance (requires GitHub CLI ≥ 2.49)
+gh attestation verify sf-keyaudit-linux-x86_64.tar.gz \
+  --repo veerarag1973/sf-keyaudit
+
+# 3. Inspect the CycloneDX SBOM
+curl -LO https://github.com/veerarag1973/sf-keyaudit/releases/latest/download/sf-keyaudit-v2.2.0-sbom.cdx.json
+```
+
+The SLSA Level 2 provenance attestation records the exact commit, workflow run, and build environment used to produce each binary.
 
 ---
 
@@ -105,6 +251,16 @@ sf-keyaudit --cache-file .sfkeyaudit-cache.json .
 
 # Scan inside zip and tar archives
 sf-keyaudit --scan-archives .
+
+# Apply a policy pack — exits 1 and emits policy_violations on BLOCK
+sf-keyaudit --policy-pack strict-ci .
+
+# Suppress known false positives with a triage decision
+sf-keyaudit triage set <fingerprint> false-positive --justification "test fixture"
+sf-keyaudit --triage-store .sfkeyaudit-triage.json .
+
+# Write a JSONL audit log for compliance evidence
+sf-keyaudit --audit-log audit.jsonl --actor ci-bot --repository org/repo .
 ```
 
 ---
@@ -132,6 +288,7 @@ sf-keyaudit [OPTIONS] [PATH]
 | `--verbose` | `-v` | Print each file path as it is scanned (to stderr). |
 | `--threads <N>` | | Number of parallel scan threads. Default: logical CPUs. |
 | `--config <FILE>` | | Path to a project config file (`.sfkeyaudit.yaml`). Auto-discovered if omitted. |
+| `--plugin-dir <DIR>` | | Load custom detector YAML files from DIR. Repeatable. |
 | `--staged` | | Scan only files staged for commit (`git diff --staged`). |
 | `--diff-base <GIT_REF>` | | Scan only files changed vs. GIT_REF (`git diff <GIT_REF>`). |
 | `--since-commit <REF>` | | Scan files changed between REF and HEAD. Useful for PR gates. |
@@ -144,12 +301,19 @@ sf-keyaudit [OPTIONS] [PATH]
 | `--scan-archives` | | Scan inside zip, tar, tgz, bz2, and xz archives. |
 | `--cache-file <FILE>` | | Load/save a hash-based scan cache to skip unchanged files. |
 | `--group-by <FIELD>` | | Group `--format text` output by `file`, `provider`, or `severity`. |
+| `--policy-pack <PACK>` | | Apply a named policy pack: `strict-ci`, `developer-friendly`, `enterprise-default`, or `regulated-env`. A policy violation exits 1 with `policy_violations` in the report. |
+| `--triage-store <FILE>` | | Path to the triage state store (JSON). Findings with `false-positive` or `accepted-risk` triage states are suppressed from output. |
+| `--audit-log <FILE>` | | Append every scan event and triage change to a JSONL audit log for compliance evidence. |
+| `--actor <NAME>` | | Identity recorded in the audit log (defaults to `USERNAME`/`USER` env var). |
+| `--repository <NAME>` | | Repository slug recorded in the audit log (e.g. `org/repo`). |
 
 **Subcommands**
 
 | Subcommand | Description |
 |---|---|
 | `install-hooks [--path <DIR>] [--force]` | Write `pre-commit` and `pre-push` git hooks into `<DIR>/.git/hooks/` (defaults to `.`). Skips existing hooks unless `--force` is passed. |
+| `triage set <FINGERPRINT> <STATE> [--justification <TEXT>] [--store <FILE>]` | Set the triage state for a finding identified by its fingerprint. Valid states: `open`, `false-positive`, `accepted-risk`, `needs-rotation`, `revoked`, `pending-review`. |
+| `triage list [--store <FILE>]` | List all triage decisions currently in the store. |
 
 See the full [CLI Reference](docs/cli-reference.md) for detailed documentation of every flag.
 
@@ -177,7 +341,7 @@ The JSON report includes enrichment fields and a `metrics` block added in v2.0:
 {
   "scan_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
   "tool": "sf-keyaudit",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "timestamp": "2026-04-04T10:00:00Z",
   "scan_root": "/home/user/my-project",
   "files_scanned": 42,

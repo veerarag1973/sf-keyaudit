@@ -29,8 +29,8 @@ This document describes the internal design of sf-keyaudit for contributors, mai
 ```
 src/
 ├── main.rs          Entry point, CLI wiring, parallel scan loop, report assembly
-├── cli.rs           Clap-derived Cli struct, --providers parser, all v2.0 flags
-├── config.rs        ProjectConfig loader; auto-discovery; custom rules; severity overrides
+├── cli.rs           Clap-derived Cli struct, --providers parser, all v2.2 flags (--policy-pack, --triage-store, --audit-log, --actor, --repository, --plugin-dir)
+├── config.rs        ProjectConfig loader; auto-discovery; custom rules; severity overrides; policy block; plugin_dirs loader; custom_validators
 ├── patterns.rs      Built-in pattern definitions and filter_by_providers()
 ├── scanner.rs       scan_content() — applies patterns to a single file's text
 ├── walker.rs        walk() and walk_single_file() — filesystem traversal
@@ -39,16 +39,19 @@ src/
 ├── baseline.rs      Baseline generate/load/apply/prune; BaselineEntry with timestamps
 ├── cache.rs         ScanCache: SHA-256 hash persistence; cached_files_skipped counter
 ├── ownership.rs     CodeownersMap loader; git blame integration for last_author
-├── verify.rs        Offline validation; heuristics → ValidationStatus (likely-valid / test-key)
+├── verify.rs        Offline validation; heuristics → ValidationStatus; 32 network validators; declarative custom validators; ValidatorRunner with dynamic register()
 ├── fingerprint.rs   fp- prefixed SHA-256 fingerprint derivation
 ├── entropy.rs       shannon_entropy() and high-confidence threshold
-├── types.rs         Finding, Summary, ScanMetrics, Report, OutputFormat data types
+├── policy.rs        Policy evaluation engine; evaluate() against PolicyConfig; block_count()/warn_count(); 4 built-in pack defaults
+├── triage.rs        TriageStore: load_or_create/save/set/get/apply; TriageEntry with state + justification + timestamps
+├── audit.rs         AuditLog; AuditEventKind (7 variants); append-only JSONL writing
+├── types.rs         Finding, Summary, ScanMetrics, Report, PolicyViolation, OutputFormat data types
 ├── error.rs         AuditError enum and ExitCode enum
 └── output/
     ├── mod.rs       render() dispatcher — writes to stdout or file
     ├── json.rs      JSON report serialisation
-    ├── sarif.rs     SARIF 2.1.0 serialisation
-    └── text.rs      Human-readable text output with optional --group-by
+    ├── sarif.rs     SARIF 2.1.0 serialisation; policyBlockCount/policyWarnCount in run properties
+    └── text.rs      Human-readable text output with optional --group-by; POLICY: section
 ```
 
 ---
@@ -67,6 +70,8 @@ run_inner(cli)
   ├─ ProjectConfig::load()          auto-discover .sfkeyaudit.yaml; merge CLI overrides
   ├─ build_patterns()               compile built-in regexes once
   ├─ merge_custom_rules()           append custom patterns from config
+  ├─ load_plugin_rules()            load YAML rule files from --plugin-dir directories
+  ├─ build_custom_validators()       register declarative validators from config
   ├─ filter_by_providers()          apply --providers filter
   ├─ Allowlist::load()              parse --allowlist YAML (if given)
   ├─ Baseline::load()               parse --baseline JSON (if given)
@@ -96,12 +101,18 @@ run_inner(cli)
   ├─ Baseline::apply_enriched()      suppress baselined; enrich first_seen/last_seen
   ├─ verify::run()                   heuristics → validation_status (if --verify)
   ├─ ownership::enrich()             owner + last_author (if --owners)
+  ├─ TriageStore::load_or_create()   load --triage-store JSON (if given)
+  │      └─ store.apply()            annotate findings with triage_state + justification
+  ├─ evaluate_policy()               apply PolicyConfig → Vec<PolicyViolation> (if --policy-pack)
+  │      └─ block_count/warn_count   drive exit code and POLICY: section
+  ├─ audit_log.record()              emit ScanCompleted + PolicyViolation events (if --audit-log)
   ├─ ScanCache::flush()              write updated hash DB (if --cache-file)
   │
+  ├─ Report { findings, policy_violations, ... }
   ├─ render()                        JSON / SARIF / Text → stdout or file
   │      └─ --group-by routing (text only)
   │
-  └─ ExitCode::*                     0/1/2/3/4 based on findings + warnings
+  └─ ExitCode::*                     0/1/2/3/4 based on findings + policy blocks
 ```
 
 ---
